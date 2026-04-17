@@ -1,5 +1,7 @@
 # Execution Log 0 — Project Bootstrap
 
+> **Status (as of `execution_log_2.md`):** historical bootstrap record. The `hdai` env it describes is still current. The one Phase-1-era gap — the missing `env/sanity_conv.py` advertised in README — was filled in log_2. No other edits applied.
+
 Timestamped record of everything executed from the moment the repo only contained `brief.md` up to a working `hdai` conda environment. Logged factually: what was run, why it was run, the exact output observed, and any discrepancies. No hype, no rounding.
 
 **Session date:** 2026-04-16

@@ -1,5 +1,7 @@
 # Execution Log 1 — Phase 2: First Profile of ResNet-18
 
+> **Status (as of `execution_log_2.md`):** this log describes the *first-pass* Phase-2 run and is kept as a historical record. The artefacts it produced have been **superseded** by the reworked run described in [`execution_log_2.md`](execution_log_2.md), which fixes four bugs in `profiling/run_baseline.py`, adds multi-trial statistics, renames the trace artefact, and adds analysis plots. The numeric findings (Winograd absent, TF32 TC implicit-GEMM dominates, layout-convert ≈ 10 % of GPU time) still stand — they are reproduced with tighter error bars in log_2.
+
 Pure execution record. Every command, every failure, every output, every decision with its reasoning. Claims are distinguished from observations. Where a prediction from `brief.md` did not hold, the actual behaviour is reported and investigated — the brief is not treated as ground truth.
 
 **Date of execution:** 2026-04-16

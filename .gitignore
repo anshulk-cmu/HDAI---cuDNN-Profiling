@@ -1,9 +1,3 @@
-# Chrome traces and Nsight reports (regeneratable, can be 100MB+)
-results/traces/*.json
-results/nsys/*.nsys-rep
-results/nsys/*.qdrep
-results/nsys/*.sqlite
-
 # Python
 __pycache__/
 *.pyc
@@ -23,5 +17,6 @@ Thumbs.db
 .idea/
 .vscode/
 
-# Model caches
-.cache/
+# Note: chrome-trace JSONs, Nsight reports, and plot PNGs under
+# results/ are committed deliberately so the repo reproduces the
+# paper's numbers without needing to re-run the profiler.

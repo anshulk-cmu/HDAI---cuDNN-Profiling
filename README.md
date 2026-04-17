@@ -28,21 +28,24 @@ The deliverable is a profiling report + plots + this small repo of scripts.
 
 | Phase | Status | Artefact |
 |---|---|---|
-| Bootstrap (conda env, toolchain) | Complete | [`docs/execution_log_0.md`](docs/execution_log_0.md) |
-| Phase 2 — ResNet-18 baseline profile | Complete | [`docs/execution_log_1.md`](docs/execution_log_1.md), `results/traces/resnet18_baseline.json` |
+| Phase 0 — brief read, hardware/spec corrections | Complete | [`docs/brief.md`](docs/brief.md), [`docs/execution_log_0.md`](docs/execution_log_0.md) |
+| Phase 1 — conda env, toolchain, smoke tests | Complete | [`env/check_env.py`](env/check_env.py), [`env/sanity_conv.py`](env/sanity_conv.py), [`docs/execution_log_0.md`](docs/execution_log_0.md) |
+| Phase 2 — ResNet-18 baseline profile (first pass) | Superseded | [`docs/execution_log_1.md`](docs/execution_log_1.md) |
+| Phase 2 rework — bug fixes, multi-trial rerun, analysis plots | Complete | [`docs/execution_log_2.md`](docs/execution_log_2.md), `results/traces/resnet18_baseline_bs32_benchOn.json`, `results/plots/resnet18_*.png` |
 | Phases 3–12 (other models, experiments, writeup) | Pending | — |
 
-### Headline findings so far (ResNet-18, batch 32, FP32, `cudnn.benchmark=True`)
+### Headline findings so far (ResNet-18, batch 32, FP32, `cudnn.benchmark=True`, reworked run — see `docs/execution_log_2.md`)
 
-- **Inference latency:** 9.79 ms / batch of 32 → ≈ 3 267 images/sec on the RTX 5070 Ti Laptop GPU.
-- **Conv dominates, as expected:** `aten::cudnn_convolution` accounts for **78.80 %** of CUDA time; BatchNorm 8.93 %, ReLU 5.98 %, MaxPool 3.20 %, residual `add_` 2.81 %, FC 0.16 %.
+- **Inference latency:** **11.71 ± 0.61 ms** / batch of 32 → **≈ 2 733 images/sec** on the RTX 5070 Ti Laptop GPU, measured as the mean over **7 trials × 50 iterations** of CUDA-event timing after 30 warm-ups. (The first-pass single-window number was 9.79 ms on a cold chip; the new number captures steady-state thermal behaviour and is the headline going forward.)
+- **Conv dominates, as expected:** `aten::cudnn_convolution` accounts for **79.42 %** of CUDA time; BatchNorm 8.52 %, ReLU 5.80 %, MaxPool 3.13 %, residual `add_` 2.85 %, FC 0.14 %.
 - **Winograd is absent; TF32 Tensor-Core implicit-GEMM wins.** The brief predicted Winograd would dominate ResNet-18 3×3 convs. On Blackwell + cuDNN 9.10.2, zero `winograd` kernels appear in the trace. Instead, cuDNN's benchmark search picks:
-  - `cutlass_tensorop_s1688fprop_optimized_tf32_64x64_16x10_nhwc_align4` — 41.9 %, 120 calls
-  - `sm80_xmma_fprop_implicit_gemm_tf32f32_tf32f32_f32_nhwckrsc_nchw_...` — 14.0 %, 40 calls
-  - Two `implicit_convolve_sgemm` SIMT FP32 variants for shapes that don't fit TC tiles — 13.2 %
-  - **55.9 % of total CUDA time goes through Tensor Cores in TF32 math mode** even though we did not enable AMP. PyTorch's default `torch.backends.cuda.matmul.allow_tf32 = True` silently routes ResNet-18 through TF32 on Ampere+.
-- **Layout conversions are a real cost:** `nchwToNhwcKernel` (320 invocations) + `nhwcToNchwKernel` (120 invocations) = **9.72 %** of all CUDA time spent just reformatting tensors so the NHWC-preferring TC kernels can run on an NCHW model. This strongly motivates bringing the **`channels_last` experiment (brief §8.5)** forward in priority.
-- **Phase 2 surfaced two project-wide issues:**
+  - `cutlass_tensorop_s1688fprop_optimized_tf32_64x64_16x10_nhwc_align4` — 28.4 %, 80 calls
+  - `sm80_xmma_fprop_implicit_gemm_tf32f32_…_nhwckrsc_nchw` — 18.3 %, 60 calls
+  - `sm80_xmma_fprop_implicit_gemm_tf32f32_…_nhwckrsc_nhwc` — 11.8 %, 30 calls
+  - Two `implicit_convolve_sgemm` SIMT FP32 variants for shapes that don't fit TC tiles — 11.4 %
+  - **58.4 % of total CUDA time goes through Tensor Cores in TF32 math mode** even though we did not enable AMP. PyTorch's default `torch.backends.cuda.matmul.allow_tf32 = True` silently routes ResNet-18 through TF32 on Ampere+.
+- **Layout conversions are a real cost:** `nchwToNhwcKernel` (340 invocations) + `nhwcToNchwKernel` (110 invocations) = **9.52 %** of all CUDA time spent just reformatting tensors so the NHWC-preferring TC kernels can run on an NCHW model. This strongly motivates bringing the **`channels_last` experiment (brief §8.5)** forward in priority.
+- **Two project-wide issues surfaced in Phase 2 and fixed in the log_2 rework:**
   1. `profile/` as a directory name shadows Python's stdlib `profile` module via `torch._dynamo`'s `cProfile` import chain. Renamed to `profiling/`.
   2. Running `python profiling/run_baseline.py` breaks cross-package imports because `sys.path[0]` becomes the script's folder. Canonical invocation is `python -m profiling.run_baseline …` from the repo root.
 
@@ -163,43 +166,30 @@ HDAI_Project/
 ├── docs/
 │   ├── brief.md                # full project plan (phase-by-phase, appendices)
 │   ├── execution_log_0.md      # bootstrap log: env setup, version choices
-│   └── execution_log_1.md      # Phase 2 log: first ResNet-18 profile, kernel analysis
+│   ├── execution_log_1.md      # Phase 2 log: first ResNet-18 profile (superseded)
+│   └── execution_log_2.md      # Phase-2 rework: bug fixes, multi-trial rerun, plots
 ├── env/
 │   ├── check_env.py            # verify GPU, cuDNN, PyTorch versions
-│   └── sanity_conv.py          # 10-line conv to confirm cuDNN path
+│   └── sanity_conv.py          # 10-line conv to confirm cuDNN dispatch
 ├── models/
 │   ├── __init__.py
-│   ├── resnet.py
-│   ├── mobilenet.py
-│   ├── distilbert.py
-│   └── gru.py
+│   └── resnet.py               # ResNet-18 loader; further models added in Phase 3
 ├── profiling/                  # NOTE: renamed from `profile/` to avoid stdlib collision
 │   ├── __init__.py
-│   ├── run_baseline.py
-│   ├── run_benchmark_toggle.py
-│   ├── run_amp.py
-│   ├── run_batch_sweep.py
-│   ├── run_channels_last.py
-│   └── run_seq_sweep.py
+│   └── run_baseline.py         # multi-trial CUDA-event timing + profiler trace
 ├── analysis/
 │   ├── __init__.py
-│   ├── parse_trace.py
-│   ├── classify_kernels.py
-│   ├── compute_roofline.py
-│   └── plots.py
-├── scripts/
-│   └── run_all.ps1             # overnight batch runner (brief §25)
+│   ├── parse_trace.py          # chrome-trace JSON -> per-kernel (time, #calls)
+│   ├── classify_kernels.py     # kernel-name -> coarse category
+│   └── plots.py                # Phase-2 ResNet-18 breakdown + conv-algo charts
 ├── results/
-│   ├── traces/                 # chrome-trace JSONs (gitignored)
-│   ├── nsys/                   # Nsight Systems reports (gitignored)
-│   ├── tables/                 # CSV summaries
-│   └── plots/                  # final PNGs (committed)
+│   ├── traces/                 # chrome-trace JSONs (committed)
+│   └── plots/                  # analysis PNGs (committed)
 └── writeup/
-    ├── findings.md
-    └── plots/
+    └── final_report.md         # the main writeup, sections scaffolded
 ```
 
-Large binaries (`results/traces/*.json`, `results/nsys/*.nsys-rep`) are gitignored and regeneratable. As of Phase 2 the implemented scripts are `env/check_env.py`, `models/resnet.py`, and `profiling/run_baseline.py`; the rest are placeholders filled in during brief Phases 3–10.
+Traces and plots under `results/` are **committed** so the repo reproduces the paper's numbers without needing to rerun the profiler. Phase-3 onward additions (more models, experiment drivers, Nsight reports, roofline CSVs, an overnight runner) will add folders as they are actually needed — we don't pre-scaffold empty directories.
 
 ---
 
@@ -210,36 +200,33 @@ Activate the env first (`source /c/.../conda.sh && conda activate hdai` on Git B
 Scripts live in packages (`models/`, `profiling/`, `analysis/`) and are invoked as modules from the repo root so `sys.path` includes the top-level:
 
 ```bash
-# Smoke test
+# Smoke tests
 python env/check_env.py
+python env/sanity_conv.py
 
-# Run all baselines
+# Baseline (Phase 2 — currently only ResNet-18 is wired up)
 python -m profiling.run_baseline --model resnet18
-python -m profiling.run_baseline --model mobilenetv3
-python -m profiling.run_baseline --model distilbert
-python -m profiling.run_baseline --model gru
+python -m profiling.run_baseline --model resnet18 --no-benchmark   # benchmark-off control
+python -m profiling.run_baseline --model resnet18 --batch 64       # different batch
 
-# Experiments
-python -m profiling.run_benchmark_toggle --model resnet18
-python -m profiling.run_amp              --model resnet18
-python -m profiling.run_batch_sweep      --model resnet18 --batches 1,4,16,64,256
+# Analysis: per-kernel table of a saved trace
+python -m analysis.parse_trace results/traces/resnet18_baseline_bs32_benchOn.json
 
-# Nsight capture (Windows)
-nsys profile -t cuda,cudnn,cublas,nvtx -o results/nsys/resnet18 ^
-    python -m profiling.run_baseline --model resnet18
-
-# Analysis + plots
-python -m analysis.classify_kernels results/traces/resnet18_baseline.json
+# Analysis: render Phase-2 plots (kernel-category breakdown + conv-algorithm split)
 python -m analysis.plots
+
+# Nsight capture (Phase 5, blocked on a separate install)
+# nsys profile -t cuda,cudnn,cublas,nvtx -o results/nsys/resnet18 ^
+#     python -m profiling.run_baseline --model resnet18
 ```
 
-An overnight-style runner that does all four models × all experiments lives at `scripts/run_all.ps1`.
+Phase 3 onwards (additional models, benchmark-toggle / AMP / batch-sweep drivers, Nsight captures) will add more CLI entry points under `profiling/` and `analysis/`.
 
 ---
 
 ## Deliverables
 
-1. **`writeup/findings.md`** — 8–12 page profiling report with per-model sections and cross-model observations.
+1. **`writeup/final_report.md`** — 8–12 page profiling report with per-model sections and cross-model observations.
 2. **Six final figures** in `results/plots/`:
    - `fig1_time_breakdown.png` — stacked bar, 4 models × 5 kernel categories
    - `fig2_fp16_speedup.png` — grouped bar of FP32→FP16 speedup per model

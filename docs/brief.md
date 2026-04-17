@@ -16,27 +16,28 @@
 | Phase 0 — pre-reading | [x] done | brief fully read, reference links skimmed |
 | Phase 1 — environment setup | [x] done | `hdai` conda env, torch 2.10.0+cu128, cuDNN 91002, sm_120 smoke tests pass |
 | Repo scaffolding (section 5) | [x] done | `profile/` renamed to `profiling/` — see §11 gotcha |
-| Phase 2 — first profile on ResNet-18 | [x] done | 97.923 ms CUDA / 10 iters @ batch 32. Winograd absent, TF32 TC implicit-GEMM wins. See `execution_log_1.md`. |
+| Phase 2 — first profile on ResNet-18 | [x] done (superseded by rework) | 97.923 ms CUDA / 10 iters @ batch 32 on cold chip. See `execution_log_1.md`. |
+| Phase 2 rework — bug fixes, multi-trial rerun, plots | [x] done | 11.71 ± 0.61 ms mean / 2 733 img/s (7 trials × 50 iters). Bugs in `run_baseline.py` fixed. Plots in `results/plots/`. See `execution_log_2.md`. |
 | Phase 3 — port to MobileNetV3 / DistilBERT / GRU | [ ] next | reuse the `run_baseline.py` harness, add model loaders |
-| Phase 4 — kernel classification | [ ] pending | |
+| Phase 4 — kernel classification | [ ] partial | `analysis/classify_kernels.py` + `parse_trace.py` + `plots.py` added in log_2 for ResNet-18 only; extend to four models in Phase 3 |
 | Phase 5 — Nsight Systems timeline | [ ] blocked on Nsight install | |
-| Phase 6 — `cudnn.benchmark` toggle | [ ] pending | |
+| Phase 6 — `cudnn.benchmark` toggle | [ ] pending | `run_baseline.py` now supports `--no-benchmark` (log_2 fix) |
 | Phase 7 — FP32 vs FP16 (AMP) | [ ] pending | |
 | Phase 8 — batch-size sweep | [ ] pending | cap at what fits in 12 GB, not 16 GB |
 | Phase 9 — roofline analysis | [ ] pending | |
-| Phase 10 — cleanup and plots | [ ] pending | `channels_last` promoted in priority — layout converts are 9.72% of CUDA time in baseline |
+| Phase 10 — cleanup and plots | [ ] pending | `channels_last` promoted in priority — layout converts are 9.52% of CUDA time in baseline |
 | Phase 11 — writeup | [ ] pending | |
 | Phase 12 — buffer | [ ] pending | |
 
 **Extra experiment queued (not in original plan):** TF32-off re-profile of ResNet-18 (`torch.backends.cuda.matmul.allow_tf32 = False` + `torch.backends.cudnn.allow_tf32 = False`). Expected to make Winograd competitive again; would be a strong paired-bar figure for the writeup.
 
-### Findings so far (end of Phase 2, one model profiled)
+### Findings so far (end of Phase 2 rework, one model profiled — see `execution_log_2.md`)
 
-- **ResNet-18 latency @ batch 32, FP32 default:** 9.79 ms/iter → ~3 267 img/s.
-- **Conv is 78.80 %** of CUDA time, as predicted.
-- **Winograd predicted, TF32 Tensor-Core implicit-GEMM observed.** The brief's §1 prediction ("almost every conv layer gets Winograd") does not hold on Blackwell + cuDNN 9.10.2 + PyTorch's default TF32-on config. Top kernels are `cutlass_tensorop_s1688fprop_optimized_tf32_...` and `sm80_xmma_fprop_implicit_gemm_tf32f32_...`. This is a genuine, documented finding, not a profiling bug.
+- **ResNet-18 latency @ batch 32, FP32 default:** 11.71 ± 0.61 ms/iter (7 trials × 50 iters) → ~2 733 img/s at steady state. First-pass cold-chip number was 9.79 ms → 3 267 img/s.
+- **Conv is 79.42 %** of CUDA time, as predicted.
+- **Winograd predicted, TF32 Tensor-Core implicit-GEMM observed.** The brief's §1 prediction ("almost every conv layer gets Winograd") does not hold on Blackwell + cuDNN 9.10.2 + PyTorch's default TF32-on config. Top kernels are `cutlass_tensorop_s1688fprop_optimized_tf32_...` and two layout variants of `sm80_xmma_fprop_implicit_gemm_tf32f32_...`. This is a genuine, documented finding, not a profiling bug.
 - **TF32 is active by default** because PyTorch enables `allow_tf32=True` on `sm_80+`. "FP32 inference" on Blackwell silently uses Tensor Cores in TF32 math mode.
-- **Layout-conversion kernels eat 9.72 %** of CUDA time (440 NCHW↔NHWC converts per 10 iterations). Motivates doing the `channels_last` experiment (§8.5) sooner.
+- **Layout-conversion kernels eat 9.52 %** of CUDA time (450 NCHW↔NHWC converts per 10 iterations). Motivates doing the `channels_last` experiment (§8.5) sooner.
 
 ### Environment subsections completed
 
@@ -51,7 +52,7 @@ Still to do from section 2:
 - 2.6 Nsight Systems 2025.x (required before Phase 5)
 - 2.7 Nsight Compute (optional stretch)
 
-See `execution_log_0.md` for the full bootstrap trace, `execution_log_1.md` for the Phase 2 profile.
+See `execution_log_0.md` for the full bootstrap trace, `execution_log_1.md` for the first-pass Phase 2 profile, and `execution_log_2.md` for the reworked Phase 2 (bug fixes, multi-trial rerun, analysis plots).
 
 ---
 
@@ -79,7 +80,7 @@ torchvision model, ~11M parameters, standard ImageNet classification. We pick 18
 
 What we expect to see in the profile: 70–80% of inference time in `cudnn::...winograd...` or `sm80_xmma_gemm_...` kernels (depending on FP32 vs FP16), a small slice in `batch_norm`, negligible elementwise time, and single-digit-percent overhead. This is the "healthy compute-bound CNN" reference point.
 
-> **Observed on this hardware (Phase 2, 2026-04-16).** Conv came in at 78.80% — the "70–80%" band holds. But *zero* Winograd kernels appeared. PyTorch's default `allow_tf32=True` steered cuDNN's benchmark search toward TF32 Tensor-Core implicit-GEMM instead: 41.88% of CUDA time in `cutlass_tensorop_s1688fprop_optimized_tf32_64x64_16x10_nhwc_align4` and 13.96% in `sm80_xmma_fprop_implicit_gemm_tf32f32_tf32f32_f32_nhwckrsc_nchw_...`. On Blackwell + cuDNN 9.10.2, Blackwell's 5th-gen Tensor Cores appear to beat any Winograd variant cuDNN has compiled for `sm_120`. The prediction in this paragraph holds in *spirit* (conv dominates, Tensor Cores engage); the specific *algorithm name* is different. See `execution_log_1.md §5–§6` for the full kernel inventory.
+> **Observed on this hardware (Phase 2 rework, 2026-04-17).** Conv came in at 79.42% — the "70–80%" band holds. But *zero* Winograd kernels appeared. PyTorch's default `allow_tf32=True` steered cuDNN's benchmark search toward TF32 Tensor-Core implicit-GEMM instead: 28.44% of CUDA time in `cutlass_tensorop_s1688fprop_optimized_tf32_64x64_16x10_nhwc_align4`, 18.26% in `sm80_xmma_fprop_implicit_gemm_tf32f32_..._nhwckrsc_nchw`, and 11.75% in a second `...nhwckrsc_nhwc` variant of the same xmma kernel (total 58.44% through Tensor Cores). On Blackwell + cuDNN 9.10.2, Blackwell's 5th-gen Tensor Cores appear to beat any Winograd variant cuDNN has compiled for `sm_120`. The prediction in this paragraph holds in *spirit* (conv dominates, Tensor Cores engage); the specific *algorithm name* is different. See `execution_log_2.md §6` for the full kernel inventory.
 
 ### Model 2 — MobileNetV3-Small (memory-bound conv, depthwise-dominated)
 
@@ -122,7 +123,7 @@ Total unique kernel patterns across all four: probably 30–40 distinct kernels.
 
 ## 2. Hardware and environment setup (the part with actual gotchas)
 
-The RTX 5070 is Blackwell architecture, compute capability sm_120. This is newer than most PyTorch tutorials assume, and the default `pip install torch` will give you a wheel that was compiled without sm_120 support, which fails silently with an opaque "no kernel image available" error at first CUDA call.
+The RTX 5070 Ti Laptop GPU is Blackwell architecture, compute capability sm_120. This is newer than most PyTorch tutorials assume, and the default `pip install torch` will give you a wheel that was compiled without sm_120 support, which fails silently with an opaque "no kernel image available" error at first CUDA call.
 
 ### 2.1 Verify hardware and drivers
 
@@ -132,7 +133,7 @@ Open PowerShell. Run:
 nvidia-smi
 ```
 
-Expected output: your driver version, CUDA version reported (driver-level, not toolkit-level), and the RTX 5070 with its memory and power state. Write down the driver version — you want it at or above 570.xx for full sm_120 support. If it's older, update from https://www.nvidia.com/Download/index.aspx before doing anything else. This takes 15 minutes and requires a reboot, and it's the single biggest source of "nothing works" failures on Blackwell.
+Expected output: your driver version, CUDA version reported (driver-level, not toolkit-level), and the RTX 5070 Ti Laptop GPU with its memory and power state. Write down the driver version — you want it at or above 570.xx for full sm_120 support. If it's older, update from https://www.nvidia.com/Download/index.aspx before doing anything else. This takes 15 minutes and requires a reboot, and it's the single biggest source of "nothing works" failures on Blackwell.
 
 ### 2.2 Install CUDA Toolkit 12.8 (optional but helpful)
 
@@ -168,7 +169,7 @@ print(torch.__version__)                    # should be 2.7+ or 2.10+
 print(torch.version.cuda)                    # should say 12.8
 print(torch.backends.cudnn.version())        # should say 91xxx (cuDNN 9.x)
 print(torch.cuda.is_available())             # True
-print(torch.cuda.get_device_name(0))         # "NVIDIA GeForce RTX 5070"
+print(torch.cuda.get_device_name(0))         # "NVIDIA GeForce RTX 5070 Ti Laptop GPU"
 print(torch.cuda.get_device_capability(0))   # (12, 0)
 
 # Actually run a kernel to confirm sm_120 works
@@ -388,7 +389,7 @@ hdai-project/
 │   ├── tables/               # CSV output of kernel-level data
 │   └── plots/                # PNGs
 └── writeup/
-    ├── findings.md           # the main writeup
+    ├── final_report.md       # the main writeup
     └── plots/                # copy of plots used in the writeup
 ```
 
@@ -688,7 +689,7 @@ Each plot: matplotlib, saved as PNG at 200 DPI, consistent color scheme across p
 
 ### Phase 11: Writeup
 
-Structure for `writeup/findings.md`:
+Structure for `writeup/final_report.md`:
 
 1. **What I did** (1 paragraph): four models, three experiments, ~40 profiling runs total.
 2. **Hardware and software** (1 paragraph): 5070, CUDA 12.8, cuDNN 9.x, PyTorch 2.x.
@@ -922,14 +923,14 @@ By end of project, your `results/` directory should contain:
 - `fig6_nsight_timeline.png` — screenshot from Nsight GUI
 
 **Writeup:**
-- `findings.md` — the prose document, 8–12 pages
+- `final_report.md` — the prose document, 8–12 pages
 - Embedded plots
 
 ---
 
 ## 10. Writeup template
 
-Here's the structure to follow for `writeup/findings.md`. Aim for 8–12 pages.
+Here's the structure to follow for `writeup/final_report.md`. Aim for 8–12 pages.
 
 ```markdown
 # Profiling cuDNN across Four Deep Learning Models
@@ -937,14 +938,14 @@ Here's the structure to follow for `writeup/findings.md`. Aim for 8–12 pages.
 ## Summary
 
 We profiled four models — ResNet-18, MobileNetV3-Small, DistilBERT-base, and
-a tiny GRU — on an RTX 5070 (Blackwell) using PyTorch Profiler and
+a tiny GRU — on an RTX 5070 Ti Laptop GPU (Blackwell) using PyTorch Profiler and
 Nsight Systems. The models span the compute-bound/memory-bound spectrum on
 both conv and matmul axes. Key findings: [3 sentences summarizing the main
 story].
 
 ## Hardware and software
 
-RTX 5070 (Blackwell, sm_120), CUDA 12.8, cuDNN 9.x, PyTorch 2.x,
+RTX 5070 Ti Laptop GPU (Blackwell, sm_120), CUDA 12.8, cuDNN 9.x, PyTorch 2.x,
 Windows 11. Profiling with torch.profiler and Nsight Systems 2025.x.
 All measurements are inference-only, batch 32 unless stated, with warmup.
 
@@ -1146,7 +1147,7 @@ For a given conv layer, cuDNN's heuristic or benchmark mode picks one of these b
 
 ---
 
-## 14. Appendix C — RTX 5070 Blackwell specs (quick reference)
+## 14. Appendix C — RTX 5070 Ti Laptop GPU (Blackwell) specs (quick reference)
 
 - Architecture: Blackwell (GB203)
 - Compute capability: sm_120
@@ -1210,7 +1211,7 @@ python scripts/run_all.py
 If a TA or a PhD student glances at your repo, what should they see?
 
 **In two minutes, they should:**
-- Open `writeup/findings.md` and understand the methodology from the first paragraph
+- Open `writeup/final_report.md` and understand the methodology from the first paragraph
 - See the four figures and grasp the story without reading captions carefully
 - See a table with numbers per model
 
@@ -1639,7 +1640,7 @@ If you use Git LFS, put the final plots there to keep the main repo small. But f
 # cuDNN Profiling on Blackwell
 
 Profiling four models (ResNet-18, MobileNetV3-Small, DistilBERT, tiny GRU)
-on RTX 5070 using PyTorch Profiler and Nsight Systems.
+on RTX 5070 Ti Laptop GPU using PyTorch Profiler and Nsight Systems.
 
 ## Setup
 1. `conda env create -f environment.yml` (or `pip install -r requirements.txt`)
@@ -1650,10 +1651,10 @@ on RTX 5070 using PyTorch Profiler and Nsight Systems.
 python scripts/run_all.py
 python analysis/plots.py
 ```
-See `writeup/findings.md` for results.
+See `writeup/final_report.md` for results.
 
 ## Hardware
-RTX 5070, CUDA 12.8, cuDNN 9.x, PyTorch 2.x.
+RTX 5070 Ti Laptop GPU, CUDA 12.8, cuDNN 9.x, PyTorch 2.x.
 ```
 
 ---

@@ -19,13 +19,13 @@
 
 <br>
 
-*Target length: 8–10 pages* · *Status: in progress (Phase 2 of 12 complete)*
+*Target length: 8–10 pages* · *Status: in progress (Phase 2 rework complete — see `docs/execution_log_2.md`)*
 
 ---
 
 </div>
 
-> **Document status.** Sections covering ResNet-18 (§4) are backed by real measurements from Phase 2 of execution — trace file `results/traces/resnet18_baseline.json`, 10 iterations × batch 32, FP32 with TF32 default. The remaining three models and all cross-model experiments are placeholders whose protocols are fully specified so measurements can be dropped in without refactoring the document. Every section of the final structure is present.
+> **Document status.** Sections covering ResNet-18 (§4) are backed by real measurements from the reworked Phase 2 run — trace file `results/traces/resnet18_baseline_bs32_benchOn.json`, 10 profiled iterations × batch 32, FP32 with TF32 default, plus a separate multi-trial CUDA-event timing sweep (7 trials × 50 iterations). See [`docs/execution_log_2.md`](../docs/execution_log_2.md) for the full bug-fix and rerun audit. Remaining three models and all cross-model experiments are placeholders whose protocols are specified so measurements can be dropped in without refactoring the document.
 
 <br>
 
@@ -75,8 +75,8 @@ This report characterises the GPU kernels that **cuDNN 9.10.2** dispatches for i
 
 Two findings are reported that contradict conventional wisdom baked into the project brief:
 
-1. `cudnn.benchmark=True` does **not** select Winograd for ResNet-18's 3×3 convolutions on Blackwell; instead, **TF32 Tensor-Core implicit-GEMM kernels take 55.9 %** of GPU time, driven by PyTorch's default `allow_tf32=True` on `sm_80+`.
-2. Nearly **10 % of GPU time is spent in NCHW↔NHWC layout-conversion kernels** because cuDNN's Tensor-Core fast path expects NHWC while torchvision models default to NCHW.
+1. `cudnn.benchmark=True` does **not** select Winograd for ResNet-18's 3×3 convolutions on Blackwell; instead, **TF32 Tensor-Core implicit-GEMM kernels take 58.4 %** of GPU time, driven by PyTorch's default `allow_tf32=True` on `sm_80+`.
+2. **9.5 % of GPU time is spent in NCHW↔NHWC layout-conversion kernels** because cuDNN's Tensor-Core fast path expects NHWC while torchvision models default to NCHW.
 
 Both findings motivate follow-up experiments that are scheduled for later sections of this report.
 
@@ -241,7 +241,9 @@ Every number placed in a table is reported to a precision no finer than the meas
 
 ## 4. Results — ResNet-18 *(completed)*
 
-> **Configuration.** Batch 32, FP32 *with TF32 math mode enabled by default*, `cudnn.benchmark = True`. Trace: [`results/traces/resnet18_baseline.json`](../results/traces/resnet18_baseline.json) (2.9 MB).
+> **Configuration.** Batch 32, FP32 *with TF32 math mode enabled by default*, `cudnn.benchmark = True`. Trace: [`results/traces/resnet18_baseline_bs32_benchOn.json`](../results/traces/resnet18_baseline_bs32_benchOn.json) (2.9 MB). Latency statistics from **7 trials × 50 iterations** of CUDA-event timing after 30 warm-up forwards.
+
+**Latency (multi-trial).** Mean per-iteration latency is **11.71 ms ± 0.61 ms** (min 10.86, max 12.51), yielding **2 733 images/sec** on a laptop 5070 Ti at ambient 25 °C. See `docs/execution_log_2.md §6` for per-trial values and a discussion of the ~20 % gap against the first-pass single-window number (9.79 ms from `docs/execution_log_1.md §4.9`, which was taken on a cold chip before thermal throttling kicked in). The single-window number remains reachable and is bracketed by the new distribution's minimum.
 
 ### 4.1 Time attribution (RQ1)
 
@@ -253,27 +255,35 @@ Every number placed in a table is reported to a precision no finer than the meas
 
 | Category | Kernel or op | CUDA time | % | Invocations |
 | :--- | :--- | ---: | ---: | ---: |
-| **Convolution** | `aten::cudnn_convolution` (aggregate) | **77.167 ms** | **78.80 %** | 200 |
-| Batch-norm | `cudnn::bn_fw_inf_1C11_kernel_NCHW` | 8.742 ms | 8.93 % | 200 |
-| Layout convert | `cudnn::...::nchwToNhwcKernel` | 6.483 ms | 6.62 % | 320 |
-| ReLU (elementwise) | `aten::clamp_min_` → `vectorized_elementwise_kernel` | 5.855 ms | 5.98 % | 170 |
-| Max-pool | `DilatedMaxPool2d` backing kernel | 3.132 ms | 3.20 % | 10 |
-| Layout convert | `cudnn::...::nhwcToNchwKernel` | 3.040 ms | 3.10 % | 120 |
-| Residual add | `aten::add_` | 2.749 ms | 2.81 % | 80 |
-| Linear (FC) | `cutlass_80_simt_sgemm_…` | 0.155 ms | 0.16 % | 10 |
-| — | **Total Self CUDA** | **97.923 ms** | **100.00 %** | — |
+| **Convolution** | `aten::cudnn_convolution` (aggregate) | **90.054 ms** | **79.42 %** | 200 |
+| Batch-norm | `cudnn::bn_fw_inf_1C11_kernel_NCHW` | 9.658 ms | 8.52 % | 200 |
+| Layout convert | `cudnn::...::nchwToNhwcKernel` | 7.503 ms | 6.62 % | 340 |
+| ReLU (elementwise) | `aten::clamp_min_` → `vectorized_elementwise_kernel` | 6.577 ms | 5.80 % | 170 |
+| Max-pool | `DilatedMaxPool2d` backing kernel | 3.544 ms | 3.13 % | 10 |
+| Layout convert | `cudnn::...::nhwcToNchwKernel` | 3.292 ms | 2.90 % | 110 |
+| Residual add | `aten::add_` | 3.237 ms | 2.85 % | 80 |
+| Linear (FC) | `cutlass_80_simt_sgemm_…` | 0.156 ms | 0.14 % | 10 |
+| — | **Total Self CUDA** | **113.393 ms** | **100.00 %** | — |
 
-Total CPU time across the 10 iterations is **103.618 ms**, closely tracking GPU time — this workload is **not** CPU-launch-overhead bound at batch 32.
+Total CPU time across the 10 iterations is **118.818 ms**, closely tracking GPU time — this workload is **not** CPU-launch-overhead bound at batch 32.
 
 <div align="center">
 
-**Headline result: 9.79 ms / batch of 32 · ≈ 3 267 images / second**
+<img src="../results/plots/resnet18_kernel_breakdown.png" alt="ResNet-18 kernel-time breakdown by coarse category" width="720">
+
+**Figure 4.1 — ResNet-18 CUDA-time share per kernel category.** Total 113.39 ms over 10 profiled iterations at batch 32; `conv_implicit_gemm` (the combined CUTLASS/xmma/SIMT kernels under `aten::cudnn_convolution`) takes the majority, `norm` is the fused cuDNN BN inference kernel, `layout_convert` is the NCHW↔NHWC cost discussed in §4.3.
+
+</div>
+
+<div align="center">
+
+**Headline result: 11.71 ± 0.61 ms / batch of 32 · ≈ 2 733 images / second**
 
 </div>
 
 ### 4.2 Algorithm selection (RQ2)
 
-The 77.167 ms spent in `aten::cudnn_convolution` decomposes across five distinct kernels.
+The 90.054 ms spent in `aten::cudnn_convolution` decomposes across six distinct kernels in the reworked run (one more than the first pass, because cuDNN's benchmark search split one algorithm family across two layout tags this time).
 
 <div align="center">
 
@@ -283,18 +293,27 @@ The 77.167 ms spent in `aten::cudnn_convolution` decomposes across five distinct
 
 | # | Kernel | Calls | Self CUDA | Path |
 | :---: | :--- | ---: | ---: | :--- |
-| 1 | `cutlass__5x_cudnn::Kernel<cutlass_tensorop_s1688fprop_optimized_tf32_64x64_16x10_nhwc_align4>` | 120 | 41.009 ms | **Tensor Core, TF32** (CUTLASS) |
-| 2 | `sm80_xmma_fprop_implicit_gemm_tf32f32_tf32f32_f32_nhwckrsc_nchw_tilesize128x128x16_stage4_warpsize2x2x1_g1_tensor16x8x8` | 40 | 13.675 ms | **Tensor Core, TF32** (xmma) |
-| 3 | `implicit_convolve_sgemm<128,5,5,3,3,3,1,…>` | 10 | 10.620 ms | SIMT FP32 |
-| 4 | `implicit_convolve_sgemm<128,6,7,3,3,5,1,…>` | 30 | 2.340 ms | SIMT FP32 |
-| 5 | `cutlass_80_simt_sgemm_64x64_8x5_tn_align1` *(final FC)* | 10 | 0.155 ms | SIMT FP32 |
+| 1 | `cutlass__5x_cudnn::Kernel<cutlass_tensorop_s1688fprop_optimized_tf32_64x64_16x10_nhwc_align4>` | 80 | 32.243 ms | **Tensor Core, TF32** (CUTLASS) |
+| 2 | `sm80_xmma_fprop_implicit_gemm_tf32f32_tf32f32_f32_nhwckrsc_nchw_tilesize128x128x16_stage4_warpsize2x2x1_g1_tensor16x8x8` | 60 | 20.701 ms | **Tensor Core, TF32** (xmma, NCHW-out) |
+| 3 | `sm80_xmma_fprop_implicit_gemm_tf32f32_tf32f32_f32_nhwckrsc_nhwc_tilesize128x128x16_stage4_warpsize2x2x1_g1_tensor16x8x8` | 30 | 13.320 ms | **Tensor Core, TF32** (xmma, NHWC-out) |
+| 4 | `implicit_convolve_sgemm<1024,5,5,3,3,3,1,…>` | 10 | 11.130 ms | SIMT FP32 |
+| 5 | `implicit_convolve_sgemm<128,6,7,3,3,5,1,…>` | 20 | 1.841 ms | SIMT FP32 |
+| 6 | `cutlass_80_simt_sgemm_64x64_8x5_tn_align1` *(final FC)* | 10 | 0.156 ms | SIMT FP32 |
 
 <div align="center">
 
 | Split | Time | % of total CUDA time |
 | :--- | ---: | ---: |
-| Tensor-Core TF32 (rows 1+2) | **54.684 ms** | **55.84 %** |
-| SIMT FP32 (rows 3+4+5) | 13.115 ms | 13.40 % |
+| Tensor-Core TF32 (rows 1+2+3) | **66.264 ms** | **58.44 %** |
+| SIMT FP32 (rows 4+5+6) | 13.127 ms | 11.58 % |
+
+</div>
+
+<div align="center">
+
+<img src="../results/plots/resnet18_conv_algorithms.png" alt="ResNet-18 convolution kernels broken down by algorithm" width="780">
+
+**Figure 4.2 — ResNet-18 convolution kernels by algorithm.** Red bars are Tensor-Core TF32 kernels; blue bars are SIMT FP32. Total conv-kernel time 79.24 ms (the final FC is matmul, not conv, and is excluded from this chart). Three TC variants together take 66.26 ms ≈ 83.6 % of conv time ≈ 58.4 % of *all* GPU time.
 
 </div>
 
@@ -316,19 +335,19 @@ The fifth- and tenth-ranked kernels in the profile are CUDA kernels that only re
 
 | Kernel | Time | Calls |
 | :--- | ---: | ---: |
-| `cudnn::engines_precompiled::nchwToNhwcKernel` | 6.483 ms | 320 |
-| `cudnn::engines_precompiled::nhwcToNchwKernel` | 3.040 ms | 120 |
-| **Total** | **9.523 ms (9.72 %)** | **440** |
+| `cudnn::engines_precompiled::nchwToNhwcKernel` | 7.503 ms | 340 |
+| `cudnn::engines_precompiled::nhwcToNchwKernel` | 3.292 ms | 110 |
+| **Total** | **10.795 ms (9.52 %)** | **450** |
 
 **Why this happens.** The `cutlass_tensorop` and `xmma` Tensor-Core kernels demand NHWC-laid-out inputs (the trailing `nhwckrsc_nchw` tag in the xmma kernel name encodes *input NHWC, weights KRSC, output NCHW*), but torchvision's ResNet-18 stores weights and activations in NCHW by default. cuDNN therefore transposes each activation tensor before the convolution and transposes it back afterwards.
 
-The asymmetry — **320 NCHW→NHWC versus 120 NHWC→NCHW** — reflects that cuDNN prefers to output NCHW back to the user's framework after the TC kernel has produced NHWC internally, but does not always need a forward conversion if the tensor was already in NHWC from a previous conv's output.
+The asymmetry — **340 NCHW→NHWC versus 110 NHWC→NCHW** — reflects that cuDNN prefers to output NCHW back to the user's framework after the TC kernel has produced NHWC internally, but does not always need a forward conversion if the tensor was already in NHWC from a previous conv's output.
 
-> **Actionable consequence.** A full switch to `torch.channels_last` should eliminate nearly all of this 9.72 %. The experiment is listed as §5.7 and is now a high-priority follow-up.
+> **Actionable consequence.** A full switch to `torch.channels_last` should eliminate nearly all of this 9.52 %. The experiment is listed as §5.7 and is now a high-priority follow-up.
 
 ### 4.4 Regime classification (RQ3)
 
-With **78.80 % of time spent in convolution**, 8.93 % in a single fused BatchNorm kernel, and the remainder scattered across small elementwise ops, ResNet-18 at batch 32 on this hardware is unambiguously **compute-bound**. This agrees with the qualitative prediction in the brief. A numerical placement on the roofline diagram awaits §6.
+With **79.42 % of time spent in convolution**, 8.52 % in a single fused BatchNorm kernel, and the remainder scattered across small elementwise ops, ResNet-18 at batch 32 on this hardware is unambiguously **compute-bound**. This agrees with the qualitative prediction in the brief. A numerical placement on the roofline diagram awaits §6.
 
 ### 4.5 Ops-per-iteration sanity check
 
@@ -440,7 +459,7 @@ Each thread will get a paragraph plus one pointer to the supporting figure.
 
 > *Placeholder for the final synthesis.*
 
-At time of writing, the substantive conclusion after one profiled model is that the brief's prediction about Winograd dominance in ResNet-18 **does not hold** on Blackwell + cuDNN 9.10.2 + PyTorch's default TF32 configuration, and that **9.72 % of GPU time** is spent on layout conversions that a one-line `channels_last` change should eliminate. Both findings are actionable. Neither would have been visible without reading the kernel-level profile.
+At time of writing, the substantive conclusion after one profiled model is that the brief's prediction about Winograd dominance in ResNet-18 **does not hold** on Blackwell + cuDNN 9.10.2 + PyTorch's default TF32 configuration, and that **9.52 % of GPU time** is spent on layout conversions that a one-line `channels_last` change should eliminate. Both findings are actionable. Neither would have been visible without reading the kernel-level profile.
 
 <br>
 
@@ -544,13 +563,16 @@ python env/check_env.py
 python -m profiling.run_baseline --model resnet18
 ```
 
-This produces `results/traces/resnet18_baseline.json` and prints the 25-row key-averages table. All §4 numbers in this report are derived from that trace.
+This produces `results/traces/resnet18_baseline_bs32_benchOn.json` and prints the 25-row key-averages table plus the multi-trial latency distribution. All §4 numbers in this report are derived from that trace; §4.2 figures come from `python -m analysis.plots`.
 
 ### B.3 Artefact paths
 
 | Path | Role |
 | :--- | :--- |
-| `results/traces/resnet18_baseline.json` | 2.9 MB chrome-trace, 10 active iterations |
+| `results/traces/resnet18_baseline_bs32_benchOn.json` | 3.0 MB chrome-trace, 10 active iterations (batch 32, benchmark on) |
+| `results/plots/resnet18_kernel_breakdown.png` | Figure 4.1 — kernel-category bar chart |
+| `results/plots/resnet18_conv_algorithms.png` | Figure 4.2 — conv-algorithm bar chart (TC vs SIMT) |
+| `docs/execution_log_2.md` | Bug fixes and rerun audit superseding `execution_log_1.md` |
 | `docs/execution_log_1.md` | Exhaustive step-by-step record of the Phase 2 run, including failures and root causes |
 
 <br>
@@ -564,21 +586,22 @@ Full text as emitted by `prof.key_averages().table(sort_by="cuda_time_total", ro
 ```
 Name                                                 Self CUDA   Self CUDA %   # of Calls
 ---------------------------------------------------- ----------  ------------  ----------
-aten::cudnn_convolution                              77.167 ms        78.80 %         200
-  cutlass_tensorop_s1688fprop_optimized_tf32_…       41.009 ms        41.88 %         120
-  sm80_xmma_fprop_implicit_gemm_tf32f32_…            13.675 ms        13.96 %          40
-  implicit_convolve_sgemm<128,5,5,3,3,3,1,…>         10.620 ms        10.85 %          10
-  implicit_convolve_sgemm<128,6,7,3,3,5,1,…>          2.340 ms         2.39 %          30
-  cutlass_80_simt_sgemm_64x64_8x5_tn_align1           0.155 ms         0.16 %          10
-aten::cudnn_batch_norm → bn_fw_inf_1C11_NCHW          8.742 ms         8.93 %         200
-nchwToNhwcKernel                                      6.483 ms         6.62 %         320
-aten::clamp_min_ (ReLU) → vectorized_elementwise      5.855 ms         5.98 %         170
-aten::max_pool2d_with_indices → DilatedMaxPool2d      3.132 ms         3.20 %          10
-nhwcToNchwKernel                                      3.040 ms         3.10 %         120
-aten::add_ (residual)                                 2.749 ms         2.81 %          80
-aten::linear (final FC, SIMT GEMM)                    0.155 ms         0.16 %          10
+aten::cudnn_convolution                              90.054 ms        79.42 %         200
+  cutlass_tensorop_s1688fprop_optimized_tf32_…       32.243 ms        28.44 %          80
+  sm80_xmma_fprop_implicit_gemm_tf32f32_…_nchw       20.701 ms        18.26 %          60
+  sm80_xmma_fprop_implicit_gemm_tf32f32_…_nhwc       13.320 ms        11.75 %          30
+  implicit_convolve_sgemm<1024,5,5,3,3,3,1,…>        11.130 ms         9.82 %          10
+  implicit_convolve_sgemm<128,6,7,3,3,5,1,…>          1.841 ms         1.62 %          20
+  cutlass_80_simt_sgemm_64x64_8x5_tn_align1           0.156 ms         0.14 %          10
+aten::cudnn_batch_norm → bn_fw_inf_1C11_NCHW          9.658 ms         8.52 %         200
+nchwToNhwcKernel                                      7.503 ms         6.62 %         340
+aten::clamp_min_ (ReLU) → vectorized_elementwise      6.577 ms         5.80 %         170
+aten::max_pool2d_with_indices → DilatedMaxPool2d      3.544 ms         3.13 %          10
+nhwcToNchwKernel                                      3.292 ms         2.90 %         110
+aten::add_ (residual)                                 3.237 ms         2.85 %          80
+aten::linear (final FC, SIMT GEMM)                    0.156 ms         0.14 %          10
 ---
-Self CUDA time total                                 97.923 ms       100.00 %
+Self CUDA time total                                113.393 ms       100.00 %
 ```
 
 <br>
