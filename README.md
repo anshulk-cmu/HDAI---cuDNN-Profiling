@@ -18,11 +18,37 @@ The deliverable is a profiling report + plots + this small repo of scripts.
 
 ---
 
+## Status
+
+| Phase | Status | Artefact |
+|---|---|---|
+| Bootstrap (conda env, toolchain) | Complete | [`docs/execution_log_0.md`](docs/execution_log_0.md) |
+| Hour 2 — ResNet-18 baseline profile | Complete | [`docs/execution_log_1.md`](docs/execution_log_1.md), `results/traces/resnet18_baseline.json` |
+| Hours 3–12 (other models, experiments, writeup) | Pending | — |
+
+### Headline findings so far (ResNet-18, batch 32, FP32, `cudnn.benchmark=True`)
+
+- **Inference latency:** 9.79 ms / batch of 32 → ≈ 3 267 images/sec on the RTX 5070 Ti Laptop GPU.
+- **Conv dominates, as expected:** `aten::cudnn_convolution` accounts for **78.80 %** of CUDA time; BatchNorm 8.93 %, ReLU 5.98 %, MaxPool 3.20 %, residual `add_` 2.81 %, FC 0.16 %.
+- **Winograd is absent; TF32 Tensor-Core implicit-GEMM wins.** The brief predicted Winograd would dominate ResNet-18 3×3 convs. On Blackwell + cuDNN 9.10.2, zero `winograd` kernels appear in the trace. Instead, cuDNN's benchmark search picks:
+  - `cutlass_tensorop_s1688fprop_optimized_tf32_64x64_16x10_nhwc_align4` — 41.9 %, 120 calls
+  - `sm80_xmma_fprop_implicit_gemm_tf32f32_tf32f32_f32_nhwckrsc_nchw_...` — 14.0 %, 40 calls
+  - Two `implicit_convolve_sgemm` SIMT FP32 variants for shapes that don't fit TC tiles — 13.2 %
+  - **55.9 % of total CUDA time goes through Tensor Cores in TF32 math mode** even though we did not enable AMP. PyTorch's default `torch.backends.cuda.matmul.allow_tf32 = True` silently routes ResNet-18 through TF32 on Ampere+.
+- **Layout conversions are a real cost:** `nchwToNhwcKernel` (320 invocations) + `nhwcToNchwKernel` (120 invocations) = **9.72 %** of all CUDA time spent just reformatting tensors so the NHWC-preferring TC kernels can run on an NCHW model. This strongly motivates bringing the **`channels_last` experiment (brief §8.5)** forward in priority.
+- **Hour 2 surfaced two project-wide issues:**
+  1. `profile/` as a directory name shadows Python's stdlib `profile` module via `torch._dynamo`'s `cProfile` import chain. Renamed to `profiling/`.
+  2. Running `python profiling/run_baseline.py` breaks cross-package imports because `sys.path[0]` becomes the script's folder. Canonical invocation is `python -m profiling.run_baseline …` from the repo root.
+
+A controlled TF32-off re-profile is queued as a future experiment to quantify how much of the Winograd-vs-implicit-GEMM flip is driven by TF32 specifically.
+
+---
+
 ## The model zoo (four corners of the quadrant)
 
 | Model | Params | Class | Input shape | What it demonstrates |
 |---|---|---|---|---|
-| **ResNet-18** | 11 M | Conv, compute-bound | (B, 3, 224, 224) | Winograd, clean Tensor-Core speedup |
+| **ResNet-18** | 11 M | Conv, compute-bound | (B, 3, 224, 224) | TF32 Tensor-Core implicit-GEMM (see Status above — Winograd was predicted but didn't win on Blackwell) |
 | **MobileNetV3-Small** | 2.5 M | Depthwise conv, memory-bound | (B, 3, 224, 224) | Why Tensor Cores stop helping |
 | **DistilBERT-base** | 66 M | Matmul, compute-bound | (B, 512) tokens | cuBLAS dominates, sequence-length sweep |
 | **Tiny GRU** | 0.2 M | RNN, memory-bound | (B, 100, 64) | cuDNN fused RNN kernel |
@@ -102,9 +128,16 @@ pip install torch==2.10.0 torchvision==0.25.0 torchaudio --index-url https://dow
 pip install pandas matplotlib seaborn nvtx transformers fvcore ptflops
 ```
 
-Verify the environment:
+On Git Bash (Windows) `conda` is not on PATH by default; activate via:
 
-```powershell
+```bash
+source /c/Users/worka/anaconda3/etc/profile.d/conda.sh
+conda activate hdai
+```
+
+Verify the environment (with `hdai` activated):
+
+```bash
 python env/check_env.py
 ```
 
@@ -123,7 +156,8 @@ HDAI_Project/
 ├── .gitignore
 ├── docs/
 │   ├── brief.md                # full project plan (hour-by-hour, appendices)
-│   └── execution_log_0.md      # bootstrap log: every step taken so far
+│   ├── execution_log_0.md      # bootstrap log: env setup, version choices
+│   └── execution_log_1.md      # Hour 2 log: first ResNet-18 profile, kernel analysis
 ├── env/
 │   ├── check_env.py            # verify GPU, cuDNN, PyTorch versions
 │   └── sanity_conv.py          # 10-line conv to confirm cuDNN path
@@ -133,7 +167,7 @@ HDAI_Project/
 │   ├── mobilenet.py
 │   ├── distilbert.py
 │   └── gru.py
-├── profile/
+├── profiling/                  # NOTE: renamed from `profile/` to avoid stdlib collision
 │   ├── __init__.py
 │   ├── run_baseline.py
 │   ├── run_benchmark_toggle.py
@@ -159,34 +193,38 @@ HDAI_Project/
     └── plots/
 ```
 
-Large binaries (`results/traces/*.json`, `results/nsys/*.nsys-rep`) are gitignored and regeneratable. Currently only `README.md`, `requirements.txt`, `.gitignore`, the two docs under `docs/`, and empty `__init__.py` placeholders exist — scripts are written in brief Hours 2–10.
+Large binaries (`results/traces/*.json`, `results/nsys/*.nsys-rep`) are gitignored and regeneratable. As of Hour 2 the implemented scripts are `env/check_env.py`, `models/resnet.py`, and `profiling/run_baseline.py`; the rest are placeholders filled in during brief Hours 3–10.
 
 ---
 
 ## Reproduce
 
-```powershell
+Activate the env first (`source /c/.../conda.sh && conda activate hdai` on Git Bash, plain `conda activate hdai` on PowerShell/cmd).
+
+Scripts live in packages (`models/`, `profiling/`, `analysis/`) and are invoked as modules from the repo root so `sys.path` includes the top-level:
+
+```bash
 # Smoke test
 python env/check_env.py
 
 # Run all baselines
-python profile/run_baseline.py --model resnet18
-python profile/run_baseline.py --model mobilenetv3
-python profile/run_baseline.py --model distilbert
-python profile/run_baseline.py --model gru
+python -m profiling.run_baseline --model resnet18
+python -m profiling.run_baseline --model mobilenetv3
+python -m profiling.run_baseline --model distilbert
+python -m profiling.run_baseline --model gru
 
 # Experiments
-python profile/run_benchmark_toggle.py --model resnet18
-python profile/run_amp.py             --model resnet18
-python profile/run_batch_sweep.py     --model resnet18 --batches 1,4,16,64,256
+python -m profiling.run_benchmark_toggle --model resnet18
+python -m profiling.run_amp              --model resnet18
+python -m profiling.run_batch_sweep      --model resnet18 --batches 1,4,16,64,256
 
-# Nsight capture
+# Nsight capture (Windows)
 nsys profile -t cuda,cudnn,cublas,nvtx -o results/nsys/resnet18 ^
-    python profile/run_baseline.py --model resnet18
+    python -m profiling.run_baseline --model resnet18
 
 # Analysis + plots
-python analysis/classify_kernels.py results/traces/resnet18_baseline.json
-python analysis/plots.py
+python -m analysis.classify_kernels results/traces/resnet18_baseline.json
+python -m analysis.plots
 ```
 
 An overnight-style runner that does all four models × all experiments lives at `scripts/run_all.ps1`.

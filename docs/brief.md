@@ -12,21 +12,32 @@
 | Phase | Status | Notes |
 |---|---|---|
 | Hour 0 — pre-reading | [x] done | brief fully read, reference links skimmed |
-| Hour 1 — environment setup | [x] done | `hdai` conda env built, torch 2.10.0+cu128, cuDNN 91002, sm_120 smoke tests pass. Nsight Systems install still pending. |
-| Repo scaffolding (section 5) | [x] done | directories + placeholder files created |
-| Hour 2 — first profile on ResNet-18 | [ ] next | write `env/check_env.py`, `models/resnet.py`, `profile/run_baseline.py` |
-| Hour 3 — port to all four models | [ ] pending | |
+| Hour 1 — environment setup | [x] done | `hdai` conda env, torch 2.10.0+cu128, cuDNN 91002, sm_120 smoke tests pass |
+| Repo scaffolding (section 5) | [x] done | `profile/` renamed to `profiling/` — see §11 gotcha |
+| Hour 2 — first profile on ResNet-18 | [x] done | 97.923 ms CUDA / 10 iters @ batch 32. Winograd absent, TF32 TC implicit-GEMM wins. See `execution_log_1.md`. |
+| Hour 3 — port to MobileNetV3 / DistilBERT / GRU | [ ] next | reuse the `run_baseline.py` harness, add model loaders |
 | Hour 4 — kernel classification | [ ] pending | |
 | Hour 5 — Nsight Systems timeline | [ ] blocked on Nsight install | |
 | Hour 6 — `cudnn.benchmark` toggle | [ ] pending | |
 | Hour 7 — FP32 vs FP16 (AMP) | [ ] pending | |
 | Hour 8 — batch-size sweep | [ ] pending | cap at what fits in 12 GB, not 16 GB |
 | Hour 9 — roofline analysis | [ ] pending | |
-| Hour 10 — cleanup and plots | [ ] pending | |
+| Hour 10 — cleanup and plots | [ ] pending | `channels_last` promoted in priority — layout converts are 9.72% of CUDA time in baseline |
 | Hour 11 — writeup | [ ] pending | |
 | Hour 12 — buffer | [ ] pending | |
 
-Environment subsections already completed:
+**Extra experiment queued (not in original plan):** TF32-off re-profile of ResNet-18 (`torch.backends.cuda.matmul.allow_tf32 = False` + `torch.backends.cudnn.allow_tf32 = False`). Expected to make Winograd competitive again; would be a strong paired-bar figure for the writeup.
+
+### Findings so far (end of Hour 2, one model profiled)
+
+- **ResNet-18 latency @ batch 32, FP32 default:** 9.79 ms/iter → ~3 267 img/s.
+- **Conv is 78.80 %** of CUDA time, as predicted.
+- **Winograd predicted, TF32 Tensor-Core implicit-GEMM observed.** The brief's §1 prediction ("almost every conv layer gets Winograd") does not hold on Blackwell + cuDNN 9.10.2 + PyTorch's default TF32-on config. Top kernels are `cutlass_tensorop_s1688fprop_optimized_tf32_...` and `sm80_xmma_fprop_implicit_gemm_tf32f32_...`. This is a genuine, documented finding, not a profiling bug.
+- **TF32 is active by default** because PyTorch enables `allow_tf32=True` on `sm_80+`. "FP32 inference" on Blackwell silently uses Tensor Cores in TF32 math mode.
+- **Layout-conversion kernels eat 9.72 %** of CUDA time (440 NCHW↔NHWC converts per 10 iterations). Motivates doing the `channels_last` experiment (§8.5) sooner.
+
+### Environment subsections completed
+
 - 2.1 `nvidia-smi` verified — driver 592.01, CUDA 13.1 reported, 12 GB
 - 2.3 conda env (`hdai` with Python 3.11.15)
 - 2.4 PyTorch cu128 wheel (torch 2.10.0+cu128, torchvision 0.25.0+cu128, torchaudio 2.11.0+cu128)
@@ -38,7 +49,7 @@ Still to do from section 2:
 - 2.6 Nsight Systems 2025.x (required before Hour 5)
 - 2.7 Nsight Compute (optional stretch)
 
-See `execution_log_0.md` for the full bootstrap trace.
+See `execution_log_0.md` for the full bootstrap trace, `execution_log_1.md` for the Hour 2 profile.
 
 ---
 
@@ -65,6 +76,8 @@ We want a small zoo that spans the interesting axes: conv vs matmul, compute-bou
 torchvision model, ~11M parameters, standard ImageNet classification. We pick 18 over 50 deliberately: 18 fits in a second per inference at batch 32 on the 5070, it's the most-studied model in all of convnet benchmarking history, and its layer structure (3×3 convs, residual adds, batchnorm) is exactly the pattern cuDNN was optimized for. When `cudnn.benchmark=True` is on, almost every conv layer in ResNet-18 gets a Winograd algorithm picked, which is the most characteristically-cuDNN behavior you can observe.
 
 What we expect to see in the profile: 70–80% of inference time in `cudnn::...winograd...` or `sm80_xmma_gemm_...` kernels (depending on FP32 vs FP16), a small slice in `batch_norm`, negligible elementwise time, and single-digit-percent overhead. This is the "healthy compute-bound CNN" reference point.
+
+> **Observed on this hardware (Hour 2, 2026-04-16).** Conv came in at 78.80% — the "70–80%" band holds. But *zero* Winograd kernels appeared. PyTorch's default `allow_tf32=True` steered cuDNN's benchmark search toward TF32 Tensor-Core implicit-GEMM instead: 41.88% of CUDA time in `cutlass_tensorop_s1688fprop_optimized_tf32_64x64_16x10_nhwc_align4` and 13.96% in `sm80_xmma_fprop_implicit_gemm_tf32f32_tf32f32_f32_nhwckrsc_nchw_...`. On Blackwell + cuDNN 9.10.2, Blackwell's 5th-gen Tensor Cores appear to beat any Winograd variant cuDNN has compiled for `sm_120`. The prediction in this paragraph holds in *spirit* (conv dominates, Tensor Cores engage); the specific *algorithm name* is different. See `execution_log_1.md §5–§6` for the full kernel inventory.
 
 ### Model 2 — MobileNetV3-Small (memory-bound conv, depthwise-dominated)
 
@@ -342,7 +355,7 @@ Skip anything about DeepSpeed, Megatron, vLLM, FSDP, or LLM inference optimizati
 Create this structure on your local machine:
 
 ```
-cudnn-profiling/
+hdai-project/
 ├── README.md
 ├── requirements.txt
 ├── env/
@@ -354,7 +367,8 @@ cudnn-profiling/
 │   ├── mobilenet.py          # wrapper for torchvision MobileNetV3-Small
 │   ├── distilbert.py         # wrapper for HuggingFace DistilBERT
 │   └── gru.py                # tiny custom GRU
-├── profile/
+├── profiling/                # NOTE: NOT `profile/` — that name collides with Python's stdlib
+│   ├── __init__.py           # `profile` module via torch._dynamo's cProfile import chain.
 │   ├── run_baseline.py       # profile each model at baseline settings
 │   ├── run_benchmark_toggle.py  # compare cudnn.benchmark on/off
 │   ├── run_amp.py            # FP32 vs FP16 (autocast)
@@ -421,7 +435,7 @@ def get_model():
     return tvm.resnet18(weights=tvm.ResNet18_Weights.IMAGENET1K_V1).eval().cuda()
 ```
 
-Write `profile/run_baseline.py`:
+Write `profiling/run_baseline.py` (`profile/` collides with Python stdlib — see §11):
 
 ```python
 import torch
@@ -546,7 +560,7 @@ By end of hour 4: one master table with the four models' time distribution. This
 PyTorch Profiler gives you tables. Nsight Systems gives you a picture. Profile one or two models through `nsys`:
 
 ```powershell
-nsys profile -t cuda,cudnn,cublas,nvtx -o results/nsys/resnet18 python profile/run_baseline.py --model resnet18
+nsys profile -t cuda,cudnn,cublas,nvtx -o results/nsys/resnet18 python -m profiling.run_baseline --model resnet18
 ```
 
 Open `results/nsys/resnet18.nsys-rep` in the Nsight Systems GUI. Look at:
@@ -991,9 +1005,34 @@ ncu analysis." This section is an integrity marker — graders notice.]
 
 ## 11. Troubleshooting
 
+### `AttributeError: module 'profile' has no attribute 'run'`
+
+Your project has a top-level directory named `profile/` with an `__init__.py`, which shadows Python's stdlib `profile` module. Anything that transitively imports `cProfile` (torchvision's `ops` package does, via `torch._dynamo`) will now resolve `profile` to your empty package and crash on attribute access.
+
+**Fix:** rename the directory to `profiling/` (or anything that isn't a stdlib module name). Observed on PyTorch 2.10 + torchvision 0.25; older PyTorch versions may not trigger the import chain eagerly and therefore don't reproduce this.
+
+### `ModuleNotFoundError: No module named 'models'` when running a profiler script
+
+You invoked the script as `python profiling/run_baseline.py`. That puts `profiling/` on `sys.path[0]`, not the repo root, so `from models.resnet import ...` inside the script can't find the sibling package.
+
+**Fix:** invoke as a module from the repo root: `python -m profiling.run_baseline --model resnet18`. `-m` puts the current working directory on `sys.path[0]`, so `models/`, `profiling/`, and `analysis/` are all importable.
+
 ### "No kernel image available for execution on the device"
 
 You installed the wrong PyTorch wheel. Reinstall with `--index-url https://download.pytorch.org/whl/cu128`. Verify with `torch.cuda.get_device_capability(0)` — it must return `(12, 0)`.
+
+### Expected Winograd kernels in the ResNet-18 profile, saw none
+
+On Blackwell (`sm_120`) + cuDNN 9.10.2, and with PyTorch's default `torch.backends.cuda.matmul.allow_tf32 = True`, the benchmark search picks TF32 Tensor-Core implicit-GEMM (`cutlass_tensorop_s1688fprop_optimized_tf32_...`, `sm80_xmma_fprop_implicit_gemm_tf32f32_...`) over Winograd. Winograd's ~2.25× multiplication reduction is smaller than the TF32-on-TC throughput gap; cuDNN correctly measures TC-GEMM as faster.
+
+**If you want Winograd to appear:** disable TF32 before running the profile.
+
+```python
+torch.backends.cuda.matmul.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False
+```
+
+This is not a bug; it's the intended behaviour of `cudnn.benchmark=True` on newer hardware. Treat it as a finding, not a failure.
 
 ### `torch.cuda.is_available()` returns False
 
@@ -1133,25 +1172,25 @@ A workload with intensity < 75 FLOP/byte is memory-bound in FP32. At FP16 the ri
 python env/check_env.py
 
 # Run baseline on all models
-python profile/run_baseline.py --model resnet18
-python profile/run_baseline.py --model mobilenetv3
-python profile/run_baseline.py --model distilbert
-python profile/run_baseline.py --model gru
+python -m profiling.run_baseline --model resnet18
+python -m profiling.run_baseline --model mobilenetv3
+python -m profiling.run_baseline --model distilbert
+python -m profiling.run_baseline --model gru
 
 # Or loop
-for m in resnet18 mobilenetv3 distilbert gru; do python profile/run_baseline.py --model $m; done
+for m in resnet18 mobilenetv3 distilbert gru; do python -m profiling.run_baseline --model $m; done
 
 # cudnn.benchmark toggle experiment
-python profile/run_benchmark_toggle.py --model resnet18
+python -m profiling.run_benchmark_toggle --model resnet18
 
 # FP32 vs FP16
-python profile/run_amp.py --model resnet18
+python -m profiling.run_amp --model resnet18
 
 # Batch sweep
-python profile/run_batch_sweep.py --model resnet18 --batches 1,4,16,64,256
+python -m profiling.run_batch_sweep --model resnet18 --batches 1,4,16,64,256
 
 # Nsight capture
-nsys profile -t cuda,cudnn,cublas,nvtx -o results/nsys/resnet18 python profile/run_baseline.py --model resnet18
+nsys profile -t cuda,cudnn,cublas,nvtx -o results/nsys/resnet18 python -m profiling.run_baseline --model resnet18
 
 # Analysis
 python analysis/parse_trace.py results/traces/resnet18_baseline.json
@@ -1179,7 +1218,7 @@ If a TA or a PhD student glances at your repo, what should they see?
 - See that you've actually run the scripts (git log shows multiple commits, results are dated recently)
 
 **In an hour, they should:**
-- Be able to clone, `pip install -r requirements.txt`, and run `python profile/run_baseline.py` successfully on their own machine
+- Be able to clone, `pip install -r requirements.txt`, and run `python -m profiling.run_baseline` successfully on their own machine
 - Verify your numbers within 10% on their hardware
 - Trust that you understand what you did
 
@@ -1302,7 +1341,7 @@ print(f"cuDNN conv smoke test: output shape {b.shape}")
 print("\nAll checks passed.")
 ```
 
-### 21.2 `profile/run_baseline.py`
+### 21.2 `profiling/run_baseline.py`
 
 ```python
 """Baseline profile of a single model. Saves chrome trace + top-kernel table."""
@@ -1577,7 +1616,7 @@ Thumbs.db
 ```
 
 **Do commit:**
-- All `.py` scripts in `env/`, `models/`, `profile/`, `analysis/`
+- All `.py` scripts in `env/`, `models/`, `profiling/`, `analysis/`
 - `requirements.txt`
 - `README.md` and the writeup markdown
 - Small CSV tables (`results/tables/*.csv`)
@@ -1626,26 +1665,26 @@ $models = @("resnet18", "mobilenetv3", "distilbert", "gru")
 
 Write-Host "=== Baseline profiles ==="
 foreach ($m in $models) {
-    python profile/run_baseline.py --model $m
+    python -m profiling.run_baseline --model $m
     Start-Sleep -Seconds 5  # let the GPU cool
 }
 
 Write-Host "=== cudnn.benchmark toggle ==="
 foreach ($m in $models) {
-    python profile/run_benchmark_toggle.py --model $m
+    python -m profiling.run_benchmark_toggle --model $m
     Start-Sleep -Seconds 5
 }
 
 Write-Host "=== AMP comparison ==="
 foreach ($m in $models) {
-    python profile/run_amp.py --model $m
+    python -m profiling.run_amp --model $m
     Start-Sleep -Seconds 5
 }
 
 Write-Host "=== Batch size sweep ==="
 foreach ($m in $models) {
     foreach ($b in @(1, 4, 16, 64, 256)) {
-        python profile/run_batch_sweep.py --model $m --batch $b
+        python -m profiling.run_batch_sweep --model $m --batch $b
         Start-Sleep -Seconds 3
     }
 }

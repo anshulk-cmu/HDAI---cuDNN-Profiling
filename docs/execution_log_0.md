@@ -210,12 +210,19 @@ Result: env created at `C:\Users\worka\anaconda3\envs\hdai`.
 
 ### 6.2 Installing PyTorch with the cu128 wheel
 
-Used the env's Python directly (no activation needed, avoids PATH juggling in bash):
+At this step the env was installed into via its Python directly (absolute path) because conda activation in Git Bash had not yet been set up. Later in the project we switched to the `source conda.sh && conda activate hdai && <cmd>` pattern; both forms are equivalent for pip installs. Historical command as run:
 
 ```
 $ /c/Users/worka/anaconda3/envs/hdai/python.exe -m pip install \
     torch==2.10.0 torchvision==0.25.0 torchaudio \
     --index-url https://download.pytorch.org/whl/cu128
+```
+
+Canonical form going forward:
+
+```
+$ source /c/Users/worka/anaconda3/etc/profile.d/conda.sh && conda activate hdai
+$ pip install torch==2.10.0 torchvision==0.25.0 torchaudio --index-url https://download.pytorch.org/whl/cu128
 ```
 
 Installed (final line of pip output):
@@ -238,6 +245,8 @@ Observations:
 $ /c/Users/worka/anaconda3/envs/hdai/python.exe -m pip install \
     pandas matplotlib seaborn nvtx transformers fvcore ptflops
 ```
+
+(Canonical form going forward: `pip install pandas matplotlib seaborn nvtx transformers fvcore ptflops` after `conda activate hdai`.)
 
 Installed (trimmed):
 
@@ -264,7 +273,7 @@ Notable version deltas vs. `privacy`:
 ## Step 7 — Smoke-testing the `hdai` env
 
 ```python
-$ /c/Users/worka/anaconda3/envs/hdai/python.exe -c "..."
+$ conda activate hdai && python -c "..."
 PyTorch: 2.10.0+cu128
 CUDA: 12.8
 cuDNN: 91002
