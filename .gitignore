@@ -1,0 +1,27 @@
+# Chrome traces and Nsight reports (regeneratable, can be 100MB+)
+results/traces/*.json
+results/nsys/*.nsys-rep
+results/nsys/*.qdrep
+results/nsys/*.sqlite
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+
+# Model caches
+.cache/

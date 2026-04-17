@@ -1,0 +1,12 @@
+# Install PyTorch first with the cu128 index (Blackwell sm_120 support):
+#   pip install torch==2.10.0 torchvision==0.25.0 torchaudio --index-url https://download.pytorch.org/whl/cu128
+#
+# Then install the rest from PyPI:
+
+pandas==3.0.2
+matplotlib==3.10.8
+seaborn==0.13.2
+nvtx==0.2.15
+transformers==5.5.4
+fvcore==0.1.5.post20221221
+ptflops==0.7.5
