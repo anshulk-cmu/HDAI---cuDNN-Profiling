@@ -1,5 +1,7 @@
 # cuDNN Profiling Project — Complete Plan
 
+**Course:** EEL71020 — Hardware Design for AI, IIT Jodhpur
+**Authors:** Anshul Kumar (M25AI2036), Neha Prasad (M25AI2076)
 **Target hardware:** RTX 5070 Ti Laptop GPU (Blackwell, sm_120, 12 GB), Windows 11
 **Backup:** Colab Pro (L4 or A100)
 **Time budget:** 10–12 hours end-to-end
@@ -11,24 +13,24 @@
 
 | Phase | Status | Notes |
 |---|---|---|
-| Hour 0 — pre-reading | [x] done | brief fully read, reference links skimmed |
-| Hour 1 — environment setup | [x] done | `hdai` conda env, torch 2.10.0+cu128, cuDNN 91002, sm_120 smoke tests pass |
+| Phase 0 — pre-reading | [x] done | brief fully read, reference links skimmed |
+| Phase 1 — environment setup | [x] done | `hdai` conda env, torch 2.10.0+cu128, cuDNN 91002, sm_120 smoke tests pass |
 | Repo scaffolding (section 5) | [x] done | `profile/` renamed to `profiling/` — see §11 gotcha |
-| Hour 2 — first profile on ResNet-18 | [x] done | 97.923 ms CUDA / 10 iters @ batch 32. Winograd absent, TF32 TC implicit-GEMM wins. See `execution_log_1.md`. |
-| Hour 3 — port to MobileNetV3 / DistilBERT / GRU | [ ] next | reuse the `run_baseline.py` harness, add model loaders |
-| Hour 4 — kernel classification | [ ] pending | |
-| Hour 5 — Nsight Systems timeline | [ ] blocked on Nsight install | |
-| Hour 6 — `cudnn.benchmark` toggle | [ ] pending | |
-| Hour 7 — FP32 vs FP16 (AMP) | [ ] pending | |
-| Hour 8 — batch-size sweep | [ ] pending | cap at what fits in 12 GB, not 16 GB |
-| Hour 9 — roofline analysis | [ ] pending | |
-| Hour 10 — cleanup and plots | [ ] pending | `channels_last` promoted in priority — layout converts are 9.72% of CUDA time in baseline |
-| Hour 11 — writeup | [ ] pending | |
-| Hour 12 — buffer | [ ] pending | |
+| Phase 2 — first profile on ResNet-18 | [x] done | 97.923 ms CUDA / 10 iters @ batch 32. Winograd absent, TF32 TC implicit-GEMM wins. See `execution_log_1.md`. |
+| Phase 3 — port to MobileNetV3 / DistilBERT / GRU | [ ] next | reuse the `run_baseline.py` harness, add model loaders |
+| Phase 4 — kernel classification | [ ] pending | |
+| Phase 5 — Nsight Systems timeline | [ ] blocked on Nsight install | |
+| Phase 6 — `cudnn.benchmark` toggle | [ ] pending | |
+| Phase 7 — FP32 vs FP16 (AMP) | [ ] pending | |
+| Phase 8 — batch-size sweep | [ ] pending | cap at what fits in 12 GB, not 16 GB |
+| Phase 9 — roofline analysis | [ ] pending | |
+| Phase 10 — cleanup and plots | [ ] pending | `channels_last` promoted in priority — layout converts are 9.72% of CUDA time in baseline |
+| Phase 11 — writeup | [ ] pending | |
+| Phase 12 — buffer | [ ] pending | |
 
 **Extra experiment queued (not in original plan):** TF32-off re-profile of ResNet-18 (`torch.backends.cuda.matmul.allow_tf32 = False` + `torch.backends.cudnn.allow_tf32 = False`). Expected to make Winograd competitive again; would be a strong paired-bar figure for the writeup.
 
-### Findings so far (end of Hour 2, one model profiled)
+### Findings so far (end of Phase 2, one model profiled)
 
 - **ResNet-18 latency @ batch 32, FP32 default:** 9.79 ms/iter → ~3 267 img/s.
 - **Conv is 78.80 %** of CUDA time, as predicted.
@@ -46,10 +48,10 @@
 
 Still to do from section 2:
 - 2.2 CUDA Toolkit 12.8 (optional — needed only for standalone `nvcc` / the Nsight installer bundle)
-- 2.6 Nsight Systems 2025.x (required before Hour 5)
+- 2.6 Nsight Systems 2025.x (required before Phase 5)
 - 2.7 Nsight Compute (optional stretch)
 
-See `execution_log_0.md` for the full bootstrap trace, `execution_log_1.md` for the Hour 2 profile.
+See `execution_log_0.md` for the full bootstrap trace, `execution_log_1.md` for the Phase 2 profile.
 
 ---
 
@@ -77,7 +79,7 @@ torchvision model, ~11M parameters, standard ImageNet classification. We pick 18
 
 What we expect to see in the profile: 70–80% of inference time in `cudnn::...winograd...` or `sm80_xmma_gemm_...` kernels (depending on FP32 vs FP16), a small slice in `batch_norm`, negligible elementwise time, and single-digit-percent overhead. This is the "healthy compute-bound CNN" reference point.
 
-> **Observed on this hardware (Hour 2, 2026-04-16).** Conv came in at 78.80% — the "70–80%" band holds. But *zero* Winograd kernels appeared. PyTorch's default `allow_tf32=True` steered cuDNN's benchmark search toward TF32 Tensor-Core implicit-GEMM instead: 41.88% of CUDA time in `cutlass_tensorop_s1688fprop_optimized_tf32_64x64_16x10_nhwc_align4` and 13.96% in `sm80_xmma_fprop_implicit_gemm_tf32f32_tf32f32_f32_nhwckrsc_nchw_...`. On Blackwell + cuDNN 9.10.2, Blackwell's 5th-gen Tensor Cores appear to beat any Winograd variant cuDNN has compiled for `sm_120`. The prediction in this paragraph holds in *spirit* (conv dominates, Tensor Cores engage); the specific *algorithm name* is different. See `execution_log_1.md §5–§6` for the full kernel inventory.
+> **Observed on this hardware (Phase 2, 2026-04-16).** Conv came in at 78.80% — the "70–80%" band holds. But *zero* Winograd kernels appeared. PyTorch's default `allow_tf32=True` steered cuDNN's benchmark search toward TF32 Tensor-Core implicit-GEMM instead: 41.88% of CUDA time in `cutlass_tensorop_s1688fprop_optimized_tf32_64x64_16x10_nhwc_align4` and 13.96% in `sm80_xmma_fprop_implicit_gemm_tf32f32_tf32f32_f32_nhwckrsc_nchw_...`. On Blackwell + cuDNN 9.10.2, Blackwell's 5th-gen Tensor Cores appear to beat any Winograd variant cuDNN has compiled for `sm_120`. The prediction in this paragraph holds in *spirit* (conv dominates, Tensor Cores engage); the specific *algorithm name* is different. See `execution_log_1.md §5–§6` for the full kernel inventory.
 
 ### Model 2 — MobileNetV3-Small (memory-bound conv, depthwise-dominated)
 
@@ -194,7 +196,7 @@ Add Nsight to PATH if the installer doesn't: `C:\Program Files\NVIDIA Corporatio
 
 ### 2.7 Optional: Nsight Compute
 
-Nsight Compute is per-kernel deep analysis (roofline, memory throughput, occupancy) — more than we need for this project but useful if you want to go deeper on individual kernels. Same installer family as Nsight Systems. Skip unless you have time at hour 10.
+Nsight Compute is per-kernel deep analysis (roofline, memory throughput, occupancy) — more than we need for this project but useful if you want to go deeper on individual kernels. Same installer family as Nsight Systems. Skip unless you have time at Phase 10.
 
 ### 2.8 Verify cuDNN is actually getting called
 
@@ -237,7 +239,7 @@ Recommendation: do the first 2 hours on Colab to get rolling, then switch to loc
 
 ## 3. Background you need before you start
 
-This is the part where you close the tutorial tabs and read the actual concepts. Budget 45 minutes for this section of the plan before hour 1.
+This is the part where you close the tutorial tabs and read the actual concepts. Budget 45 minutes for this section of the plan before Phase 1.
 
 ### 3.1 What cuDNN is and how PyTorch uses it
 
@@ -300,13 +302,13 @@ For CUDA kernel names specifically, use `.key_averages(group_by_input_shape=True
 
 ### 3.6 What Nsight Systems adds
 
-PyTorch Profiler tells you what PyTorch knows about. Nsight Systems gives you the system-level timeline: CUDA API calls, kernel executions, memory transfers, CPU threads, all on one scrollable timeline. It's invaluable for spotting gaps (where the GPU is idle waiting for CPU) and launch overhead (tiny kernels stacking up). For this project we'll use it mainly for the pretty visualization and for hour 4–5 investigation when PyTorch Profiler alone isn't giving enough detail.
+PyTorch Profiler tells you what PyTorch knows about. Nsight Systems gives you the system-level timeline: CUDA API calls, kernel executions, memory transfers, CPU threads, all on one scrollable timeline. It's invaluable for spotting gaps (where the GPU is idle waiting for CPU) and launch overhead (tiny kernels stacking up). For this project we'll use it mainly for the pretty visualization and for Phase 4–5 investigation when PyTorch Profiler alone isn't giving enough detail.
 
 ---
 
 ## 4. Reference code to read before you start
 
-Don't write anything until you've read these. This is the most important hour-0 investment.
+Don't write anything until you've read these. This is the most important Phase 0 investment.
 
 ### 4.1 PyTorch Profiler official recipe
 
@@ -342,7 +344,7 @@ Classic. Old (Titan Black / Titan X era) but the methodology is the template for
 
 https://darinabal.medium.com/deep-learning-reproducible-results-using-pytorch-42034da5ad7
 
-Short article on `torch.backends.cudnn.benchmark` and `torch.backends.cudnn.deterministic`. Read it so you understand the knobs you'll be flipping in hour 6.
+Short article on `torch.backends.cudnn.benchmark` and `torch.backends.cudnn.deterministic`. Read it so you understand the knobs you'll be flipping in Phase 6.
 
 ### 4.7 What NOT to read
 
@@ -409,15 +411,15 @@ Don't pin exact versions. The Blackwell-compatible wheel changes frequently; let
 
 ---
 
-## 6. Hour-by-hour execution plan
+## 6. Phase-by-phase execution plan
 
-### Hour 0 (the pre-work): 30–45 minutes
+### Phase 0 (the pre-work): 30–45 minutes
 
 Read the Reference Code section (section 4) above. Don't skip this. Open the PyTorch profiler recipe in one tab, the Slimakanzer cudnn-benchmark source in another, and skim both.
 
-### Hour 1: Environment setup
+### Phase 1: Environment setup
 
-Follow section 2 end to end. By the end of this hour:
+Follow section 2 end to end. By the end of this phase:
 - `nvidia-smi` works
 - PyTorch with cu128 wheel installed
 - `env/check_env.py` prints GPU name, cuDNN version, successful matmul
@@ -425,7 +427,7 @@ Follow section 2 end to end. By the end of this hour:
 
 If setup takes longer than 90 minutes (common on Windows), don't push through — switch to Colab for the rest of the project and come back to local setup later. Don't burn 3 hours on driver issues.
 
-### Hour 2: First profile on ResNet-18
+### Phase 2: First profile on ResNet-18
 
 Write `models/resnet.py` — literally a five-line wrapper:
 
@@ -474,9 +476,9 @@ Things to notice and screenshot:
 - Presence/absence of `winograd` and `implicit_gemm` in kernel names
 - Ratio of CUDA time to CPU time (should be dominated by CUDA for batch 32)
 
-**Milestone:** by end of hour 2, you have a working profile script, and you've *looked at* the output. Don't move on until you can point at a specific kernel name in the output and say what it does.
+**Milestone:** by end of Phase 2, you have a working profile script, and you've *looked at* the output. Don't move on until you can point at a specific kernel name in the output and say what it does.
 
-### Hour 3: Port to all four models
+### Phase 3: Port to all four models
 
 Write the wrappers for the other three models. The pattern:
 
@@ -515,9 +517,9 @@ def get_input(batch=32, seq=100):
 
 Refactor `run_baseline.py` to loop over all four models. Each one gets its own chrome trace in `results/traces/`.
 
-At the end of hour 3: four JSON traces + four key_averages tables. Open each trace briefly. Note any surprises — e.g., if you see no `cudnn::` kernels in DistilBERT that's correct (it's cuBLAS-heavy).
+At the end of Phase 3: four JSON traces + four key_averages tables. Open each trace briefly. Note any surprises — e.g., if you see no `cudnn::` kernels in DistilBERT that's correct (it's cuBLAS-heavy).
 
-### Hour 4: Kernel classification and summary table
+### Phase 4: Kernel classification and summary table
 
 This is where you turn profiling data into *information*. Write `analysis/parse_trace.py` to load a chrome trace JSON, extract the CUDA kernel events, and dump to a pandas DataFrame.
 
@@ -553,9 +555,9 @@ Produce a per-model summary table:
 
 Save as CSV to `results/tables/baseline_breakdown.csv`.
 
-By end of hour 4: one master table with the four models' time distribution. This is the centerpiece figure of the whole project.
+By end of Phase 4: one master table with the four models' time distribution. This is the centerpiece figure of the whole project.
 
-### Hour 5: Nsight Systems timeline view
+### Phase 5: Nsight Systems timeline view
 
 PyTorch Profiler gives you tables. Nsight Systems gives you a picture. Profile one or two models through `nsys`:
 
@@ -570,9 +572,9 @@ Open `results/nsys/resnet18.nsys-rep` in the Nsight Systems GUI. Look at:
 
 Take a screenshot of the timeline for one full inference. Include in writeup.
 
-This hour is mostly about getting comfortable with the Nsight GUI, which has a learning curve. Don't try to become a Nsight expert; just generate 1–2 traces, look at them, and move on.
+This phase is mostly about getting comfortable with the Nsight GUI, which has a learning curve. Don't try to become a Nsight expert; just generate 1–2 traces, look at them, and move on.
 
-### Hour 6: The `cudnn.benchmark` experiment
+### Phase 6: The `cudnn.benchmark` experiment
 
 First structured experiment. Write `run_benchmark_toggle.py`:
 
@@ -612,7 +614,7 @@ Run for all four models. Expected results:
 
 Put results in a table. This is experiment 1 of 4.
 
-### Hour 7: FP32 vs FP16 (AMP)
+### Phase 7: FP32 vs FP16 (AMP)
 
 Write `run_amp.py`:
 
@@ -637,7 +639,7 @@ Per-model expected FP16 speedups (approximate, on 5070):
 
 The *interesting* part is to re-profile one or two models under FP16 and look at which kernels changed. ResNet-18 should show `hmma`/`mma` in many kernel names now where FP32 had plain `gemm`.
 
-### Hour 8: Batch size sweep
+### Phase 8: Batch size sweep
 
 Write `run_batch_sweep.py`. For each model, time inference at batch sizes [1, 4, 16, 64, 256] (or until OOM). For GRU and DistilBERT, also include a sequence length axis (seq=64, 128, 256, 512).
 
@@ -654,7 +656,7 @@ Expected shapes:
 
 This is experiment 3. The batch-scaling curves are a great visual for the writeup.
 
-### Hour 9: Roofline analysis (short version)
+### Phase 9: Roofline analysis (short version)
 
 Compute arithmetic intensity for each model at batch 32:
 - FLOPs: use `fvcore.nn.FlopCountAnalysis` or `torchinfo` or hand-compute for simple cases
@@ -671,7 +673,7 @@ Each model sits somewhere in the plane. Compute-bound models are near the horizo
 
 Don't over-engineer this. Rough numbers are fine. The point is to show the qualitative story.
 
-### Hour 10: Cleanup and plots
+### Phase 10: Cleanup and plots
 
 By now you have a results directory full of JSON traces, CSV tables, and screenshots. Consolidate into 5–6 final plots:
 
@@ -684,7 +686,7 @@ By now you have a results directory full of JSON traces, CSV tables, and screens
 
 Each plot: matplotlib, saved as PNG at 200 DPI, consistent color scheme across plots. Use a muted palette — seaborn's `muted` or `deep` looks professional without being flashy.
 
-### Hour 11: Writeup
+### Phase 11: Writeup
 
 Structure for `writeup/findings.md`:
 
@@ -703,9 +705,9 @@ Structure for `writeup/findings.md`:
 
 Aim for 8–12 pages. Long enough to show the per-model kernel walkthroughs, the cross-model tables, and the roofline discussion in detail — short enough that it's still a profiling study, not a thesis.
 
-### Hour 12: Buffer / slack
+### Phase 12: Buffer / slack
 
-Something will have taken longer than planned. Use this hour for whatever fell behind — probably the writeup or one experiment that needed re-running. If nothing's behind, add a small bonus experiment like channels-last memory format for vision models (one script, 30 min, often shows a surprising speedup).
+Something will have taken longer than planned. Use this phase for whatever fell behind — probably the writeup or one experiment that needed re-running. If nothing's behind, add a small bonus experiment like channels-last memory format for vision models (one script, 30 min, often shows a surprising speedup).
 
 ---
 
@@ -795,7 +797,7 @@ model = model.to(memory_format=torch.channels_last)
 x = x.to(memory_format=torch.channels_last)
 ```
 
-Speedup is workload-dependent. For ResNet-18 FP16 on recent GPUs, often 10–30% faster. For MobileNetV3-Small, usually small because depthwise convs don't benefit as much. If you have time in hour 10 or 12, run this experiment — it's a cheap ~20% improvement that's easy to explain in the writeup.
+Speedup is workload-dependent. For ResNet-18 FP16 on recent GPUs, often 10–30% faster. For MobileNetV3-Small, usually small because depthwise convs don't benefit as much. If you have time in Phase 10 or 12, run this experiment — it's a cheap ~20% improvement that's easy to explain in the writeup.
 
 ### 7.9 `torch.compile` is out of scope
 
@@ -861,7 +863,7 @@ If you want bit-exact reproducible results between runs, set `torch.backends.cud
 
 **What to report:** at what batch each model saturates, how FP16 changes the saturation point, OOM behavior at large batches.
 
-### 8.5 Experiment 5 (optional, hour 12) — channels_last
+### 8.5 Experiment 5 (optional, Phase 12) — channels_last
 
 **Goal:** Show the impact of memory layout.
 
@@ -873,7 +875,7 @@ If you want bit-exact reproducible results between runs, set `torch.backends.cud
 
 **What to report:** speedup from NHWC, especially for the FP16 Tensor Core path.
 
-### 8.6 Experiment 6 (optional, hour 12) — Sequence length sweep
+### 8.6 Experiment 6 (optional, Phase 12) — Sequence length sweep
 
 **Goal:** Show the compute-bound → memory-bound transition in transformer workloads.
 
@@ -1256,25 +1258,27 @@ Don't do more than one stretch goal. The baseline project is already plenty.
 
 ---
 
-## 19. Time ledger — expected hours
+## 19. Time ledger — rough effort estimate per phase
 
-| Block | Hours | Cumulative |
+Phases are work units, not fixed time slots — any one of them may run longer or shorter than the rough estimate below depending on how the measurements go. The numbers are indicative only.
+
+| Phase | Rough effort (h) | Cumulative (h) |
 |---|---|---|
-| Hour 0 — pre-reading | 0.75 | 0.75 |
-| Hour 1 — environment setup | 1.0 | 1.75 |
-| Hour 2 — first profile on ResNet-18 | 1.0 | 2.75 |
-| Hour 3 — port to all four models | 1.0 | 3.75 |
-| Hour 4 — kernel classification + summary | 1.0 | 4.75 |
-| Hour 5 — Nsight Systems timeline | 1.0 | 5.75 |
-| Hour 6 — cudnn.benchmark toggle | 1.0 | 6.75 |
-| Hour 7 — FP32 vs FP16 (AMP) | 1.0 | 7.75 |
-| Hour 8 — batch size sweep | 1.0 | 8.75 |
-| Hour 9 — roofline analysis | 1.0 | 9.75 |
-| Hour 10 — cleanup and plots | 1.0 | 10.75 |
-| Hour 11 — writeup | 1.0 | 11.75 |
-| Hour 12 — buffer | 1.0 | 12.75 |
+| Phase 0 — pre-reading | 0.75 | 0.75 |
+| Phase 1 — environment setup | 1.0 | 1.75 |
+| Phase 2 — first profile on ResNet-18 | 1.0 | 2.75 |
+| Phase 3 — port to all four models | 1.0 | 3.75 |
+| Phase 4 — kernel classification + summary | 1.0 | 4.75 |
+| Phase 5 — Nsight Systems timeline | 1.0 | 5.75 |
+| Phase 6 — cudnn.benchmark toggle | 1.0 | 6.75 |
+| Phase 7 — FP32 vs FP16 (AMP) | 1.0 | 7.75 |
+| Phase 8 — batch size sweep | 1.0 | 8.75 |
+| Phase 9 — roofline analysis | 1.0 | 9.75 |
+| Phase 10 — cleanup and plots | 1.0 | 10.75 |
+| Phase 11 — writeup | 1.0 | 11.75 |
+| Phase 12 — buffer | 1.0 | 12.75 |
 
-Total: ~12.75 hours. This is the realistic estimate; the 10–12 hour target assumes things go smoothly. Budget an extra 1–2 hours of slack for the inevitable driver or wheel issue on a new card.
+Rough total: ~12–13 hours of focused work if nothing misbehaves. Driver or wheel issues on a new card typically add a phase of their own.
 
 ---
 
@@ -1547,7 +1551,7 @@ The 5070 on Windows 11 has a few environmental issues that can bias your measure
 
 ## 23. FLOP counting for the roofline plot
 
-Hour 9 asks you to build a roofline plot, which needs FLOPs per model per forward pass. Don't hand-count these — use a tool.
+Phase 9 asks you to build a roofline plot, which needs FLOPs per model per forward pass. Don't hand-count these — use a tool.
 
 **Option 1: `fvcore.nn.FlopCountAnalysis` (recommended).** From Facebook Research, well-maintained.
 
@@ -1713,4 +1717,4 @@ Profiling is fundamentally about looking at numbers and being honest about what 
 
 ## End of plan
 
-Starting point: open `env/check_env.py`, run it, confirm your hardware is visible. Then go to hour 2.
+Starting point: open `env/check_env.py`, run it, confirm your hardware is visible. Then go to Phase 2.

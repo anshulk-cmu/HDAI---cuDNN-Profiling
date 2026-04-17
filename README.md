@@ -1,5 +1,11 @@
 # HDAI — cuDNN Profiling Study on Blackwell
 
+**Course:** EEL71020 — Hardware Design for AI
+**Institution:** Indian Institute of Technology, Jodhpur
+**Authors:** Anshul Kumar (M25AI2036), Neha Prasad (M25AI2076)
+
+---
+
 A compact, pedagogically-focused study profiling how **cuDNN** (and the broader CUDA stack) behaves across four deep-learning models that span the conv/matmul × compute-bound/memory-bound quadrant. All measurements are inference-only on an RTX 5070 Ti Laptop GPU (Blackwell, `sm_120`, 12 GB) using **PyTorch Profiler** and **Nsight Systems**.
 
 The goal is not to beat published numbers or optimise a model — it is to **read profiler output carefully**, catalogue which kernels cuDNN actually dispatches, and explain *why* each model looks the way it does.
@@ -23,8 +29,8 @@ The deliverable is a profiling report + plots + this small repo of scripts.
 | Phase | Status | Artefact |
 |---|---|---|
 | Bootstrap (conda env, toolchain) | Complete | [`docs/execution_log_0.md`](docs/execution_log_0.md) |
-| Hour 2 — ResNet-18 baseline profile | Complete | [`docs/execution_log_1.md`](docs/execution_log_1.md), `results/traces/resnet18_baseline.json` |
-| Hours 3–12 (other models, experiments, writeup) | Pending | — |
+| Phase 2 — ResNet-18 baseline profile | Complete | [`docs/execution_log_1.md`](docs/execution_log_1.md), `results/traces/resnet18_baseline.json` |
+| Phases 3–12 (other models, experiments, writeup) | Pending | — |
 
 ### Headline findings so far (ResNet-18, batch 32, FP32, `cudnn.benchmark=True`)
 
@@ -36,7 +42,7 @@ The deliverable is a profiling report + plots + this small repo of scripts.
   - Two `implicit_convolve_sgemm` SIMT FP32 variants for shapes that don't fit TC tiles — 13.2 %
   - **55.9 % of total CUDA time goes through Tensor Cores in TF32 math mode** even though we did not enable AMP. PyTorch's default `torch.backends.cuda.matmul.allow_tf32 = True` silently routes ResNet-18 through TF32 on Ampere+.
 - **Layout conversions are a real cost:** `nchwToNhwcKernel` (320 invocations) + `nhwcToNchwKernel` (120 invocations) = **9.72 %** of all CUDA time spent just reformatting tensors so the NHWC-preferring TC kernels can run on an NCHW model. This strongly motivates bringing the **`channels_last` experiment (brief §8.5)** forward in priority.
-- **Hour 2 surfaced two project-wide issues:**
+- **Phase 2 surfaced two project-wide issues:**
   1. `profile/` as a directory name shadows Python's stdlib `profile` module via `torch._dynamo`'s `cProfile` import chain. Renamed to `profiling/`.
   2. Running `python profiling/run_baseline.py` breaks cross-package imports because `sys.path[0]` becomes the script's folder. Canonical invocation is `python -m profiling.run_baseline …` from the repo root.
 
@@ -143,7 +149,7 @@ python env/check_env.py
 
 Expected output includes `Device: NVIDIA GeForce RTX 5070 Ti Laptop GPU`, `Compute capability: sm_120`, cuDNN `91002`, and a passing cuDNN conv smoke test.
 
-**Nsight Systems** (2025.x) is required for the timeline inspection step (brief Hour 5) — install separately from NVIDIA's developer site and add to `PATH`. It is not yet installed in this environment.
+**Nsight Systems** (2025.x) is required for the timeline inspection step (brief Phase 5) — install separately from NVIDIA's developer site and add to `PATH`. It is not yet installed in this environment.
 
 ---
 
@@ -155,9 +161,9 @@ HDAI_Project/
 ├── requirements.txt
 ├── .gitignore
 ├── docs/
-│   ├── brief.md                # full project plan (hour-by-hour, appendices)
+│   ├── brief.md                # full project plan (phase-by-phase, appendices)
 │   ├── execution_log_0.md      # bootstrap log: env setup, version choices
-│   └── execution_log_1.md      # Hour 2 log: first ResNet-18 profile, kernel analysis
+│   └── execution_log_1.md      # Phase 2 log: first ResNet-18 profile, kernel analysis
 ├── env/
 │   ├── check_env.py            # verify GPU, cuDNN, PyTorch versions
 │   └── sanity_conv.py          # 10-line conv to confirm cuDNN path
@@ -193,7 +199,7 @@ HDAI_Project/
     └── plots/
 ```
 
-Large binaries (`results/traces/*.json`, `results/nsys/*.nsys-rep`) are gitignored and regeneratable. As of Hour 2 the implemented scripts are `env/check_env.py`, `models/resnet.py`, and `profiling/run_baseline.py`; the rest are placeholders filled in during brief Hours 3–10.
+Large binaries (`results/traces/*.json`, `results/nsys/*.nsys-rep`) are gitignored and regeneratable. As of Phase 2 the implemented scripts are `env/check_env.py`, `models/resnet.py`, and `profiling/run_baseline.py`; the rest are placeholders filled in during brief Phases 3–10.
 
 ---
 
@@ -266,4 +272,4 @@ Read these before writing any code:
 - [`google/nvidia_libs_test`](https://github.com/google/nvidia_libs_test) — reference benchmark harness
 - [`soumith/convnet-benchmarks`](https://github.com/soumith/convnet-benchmarks) — classic methodology template
 
-Full background, hour-by-hour plan, kernel-name decoder, and troubleshooting appendices live in [`docs/brief.md`](docs/brief.md). The bootstrap log (environment setup, version choices, discrepancies observed) is in [`docs/execution_log_0.md`](docs/execution_log_0.md).
+Full background, phase-by-phase plan, kernel-name decoder, and troubleshooting appendices live in [`docs/brief.md`](docs/brief.md). The bootstrap log (environment setup, version choices, discrepancies observed) is in [`docs/execution_log_0.md`](docs/execution_log_0.md).

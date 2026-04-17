@@ -18,7 +18,7 @@ D:\HDAI_Project\
 └── brief.md
 ```
 
-`brief.md` is a ~33 k-token design document covering the 12-hour cuDNN profiling study across four models (ResNet-18, MobileNetV3-Small, DistilBERT-base, Tiny GRU). It was read in three chunks (lines 1–500, 500–1000, 1000–1500, 1500–end) via the `Read` tool because a single read exceeded the 25k-token limit.
+`brief.md` is a ~33 k-token design document covering the multi-phase cuDNN profiling study across four models (ResNet-18, MobileNetV3-Small, DistilBERT-base, Tiny GRU). It was read in three chunks (lines 1–500, 500–1000, 1000–1500, 1500–end) via the `Read` tool because a single read exceeded the 25k-token limit.
 
 **Why read it:** the user asked for a brief explanation and a correct README. Understanding the plan in detail (models, experiments, hardware assumptions, dependency list) was a prerequisite for both.
 
@@ -300,8 +300,8 @@ Every line is meaningful:
 **Discrepancy revisited:** the card is labelled "RTX 5070 Ti Laptop GPU", not "RTX 5070". In the brief I replaced "5080 Ti" → "5070" per the user's message. The user can decide whether to further correct to "5070 Ti Laptop". This is flagged in the summary.
 
 **What this step did NOT prove:**
-- The cuDNN path isn't being used in a suboptimal algorithm (baseline profiling in Hour 2 will reveal algorithm selection).
-- That Tensor Cores are actually engaged (FP16 autocast experiment in Hour 7 will).
+- The cuDNN path isn't being used in a suboptimal algorithm (baseline profiling in Phase 2 will reveal algorithm selection).
+- That Tensor Cores are actually engaged (FP16 autocast experiment in Phase 7 will).
 - That Nsight Systems is installed (it is a separate download; not yet done this session).
 
 ---
@@ -324,7 +324,7 @@ Setup commands were also tightened: `torch==2.10.0 torchvision==0.25.0` are now 
 
 Deliberate non-actions, for transparency:
 
-- `env/`, `models/`, `profile/`, `analysis/`, `results/`, `writeup/` directories — not created yet. README describes them as the target layout, the code will be written in later hours (brief Hours 2–10).
+- `env/`, `models/`, `profile/`, `analysis/`, `results/`, `writeup/` directories — not created yet. README describes them as the target layout, the code will be written in later phases (brief Phases 2–10).
 - `requirements.txt` — not written. Setup commands in README are authoritative for now; `requirements.txt` can be generated later with `pip freeze > requirements.txt` after the full script suite is in place.
 - `.gitignore` — not written. No `.git` directory exists in `D:\HDAI_Project` yet.
 - `env/check_env.py` — referenced in README but not yet written. Brief section 21.1 contains the exact source to paste in when needed.
@@ -357,7 +357,7 @@ Env `hdai` verified:
 - sees `NVIDIA GeForce RTX 5070 Ti Laptop GPU` at `sm_120`
 - cuDNN conv smoke test passes
 
-Ready to proceed to brief's **Hour 2** (write `env/check_env.py`, then `models/resnet.py`, then `profile/run_baseline.py`).
+Ready to proceed to brief's **Phase 2** (write `env/check_env.py`, then `models/resnet.py`, then `profile/run_baseline.py`).
 
 ---
 

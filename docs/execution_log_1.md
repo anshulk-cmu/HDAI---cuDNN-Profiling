@@ -1,4 +1,4 @@
-# Execution Log 1 — Hour 2: First Profile of ResNet-18
+# Execution Log 1 — Phase 2: First Profile of ResNet-18
 
 Pure execution record. Every command, every failure, every output, every decision with its reasoning. Claims are distinguished from observations. Where a prediction from `brief.md` did not hold, the actual behaviour is reported and investigated — the brief is not treated as ground truth.
 
@@ -11,15 +11,15 @@ Pure execution record. Every command, every failure, every output, every decisio
 
 ---
 
-## 1. Scope of Hour 2
+## 1. Scope of Phase 2
 
-Goal of the hour: produce a single trustworthy baseline profile of ResNet-18 on the laptop GPU, so the rest of the 12-hour plan has a verified harness to build on. The three files created this hour form the minimum viable profiling pipeline:
+Goal of this phase: produce a single trustworthy baseline profile of ResNet-18 on the laptop GPU, so the rest of the plan has a verified harness to build on. The three files created in this phase form the minimum viable profiling pipeline:
 
 1. An environment smoke-test script (`env/check_env.py`) — codifies the bootstrap verification from Log 0 on disk so it is reproducible.
 2. A ResNet-18 loader module (`models/resnet.py`) — a stable import point for both this and later experiments.
 3. A PyTorch Profiler driver (`profiling/run_baseline.py`) — the script that actually records kernel timings and emits a chrome-trace JSON.
 
-No attempt was made to port to other models this hour. The isolation discipline is deliberate: if the harness is broken on one model we know exactly where to look; if we tried four at once a single PyTorch/cuDNN misconfiguration would be indistinguishable from a per-model issue.
+No attempt was made to port to other models in this phase. The isolation discipline is deliberate: if the harness is broken on one model we know exactly where to look; if we tried four at once a single PyTorch/cuDNN misconfiguration would be indistinguishable from a per-model issue.
 
 ---
 
@@ -332,7 +332,7 @@ Every knob in this script was a deliberate choice. Logging them so future "tweak
 
 | Knob | Value | Why |
 |---|---|---|
-| `torch.backends.cudnn.benchmark` | `True` | We want cuDNN to run its algorithm-search once per distinct input shape and pick the fastest kernel. Without this, cuDNN uses a heuristic that can be suboptimal. All four Hour-2+ experiments assume `benchmark=True` unless they are explicitly the benchmark-toggle experiment. |
+| `torch.backends.cudnn.benchmark` | `True` | We want cuDNN to run its algorithm-search once per distinct input shape and pick the fastest kernel. Without this, cuDNN uses a heuristic that can be suboptimal. All four Phase 2+ experiments assume `benchmark=True` unless they are explicitly the benchmark-toggle experiment. |
 | Warm-up count | 30 | Two things need to warm up: (a) CUDA context + allocator + memory allocator, (b) cuDNN's algorithm search for every (input shape, weight shape) combination in the forward pass. ResNet-18 has ~20 distinct conv shapes; benchmark mode triggers a timed micro-benchmark per shape on the first iteration. 30 is the brief's §22 recommendation for benchmark mode; 10 would be too few. |
 | `ProfilerActivity.CPU + CUDA` | both | CPU alone misses all kernel times; CUDA alone misses op-level context (we wouldn't see `aten::conv2d` grouping its child cuDNN calls). Both together gives the richest trace. |
 | `record_shapes=True` | True | Allows `key_averages(group_by_input_shape=True)` analysis later. Costs a bit of recording overhead but for 10 iterations that's a non-issue. |
@@ -579,11 +579,11 @@ torch.backends.cudnn.allow_tf32 = False
 
 Then re-profile ResNet-18. Prediction: with TF32 disabled, `cudnn.benchmark=True` will measure Tensor-Core GEMM as much slower (now pure FP32, no TF32 acceleration), and Winograd becomes competitive. Expect `winograd` kernels to appear in the profile.
 
-This is added as an Hour-11 optional experiment. It would make a strong paired-bar figure for the writeup: "Same ResNet-18, same cuDNN, same benchmark=True; only math-mode changed. Algorithm selection flipped."
+This is added as a Phase 11 optional experiment. It would make a strong paired-bar figure for the writeup: "Same ResNet-18, same cuDNN, same benchmark=True; only math-mode changed. Algorithm selection flipped."
 
 ---
 
-## 7. Artefacts produced this hour
+## 7. Artefacts produced in this phase
 
 | Path | Size (bytes) | Role |
 |---|---|---|
@@ -622,7 +622,7 @@ Summary: six of seven gates met; the seventh became a finding. The finding is mo
 
 ---
 
-## 9. Decisions made this hour and why (consolidated)
+## 9. Decisions made in this phase and why (consolidated)
 
 For traceability. Every non-default knob has a reason.
 
@@ -642,7 +642,7 @@ For traceability. Every non-default knob has a reason.
 | `row_limit=25` in table | Enough rows to see all non-trivial kernel families; avoids tail noise |
 | `sort_by="cuda_time_total"` | GPU kernel time is the subject of the study |
 | Did not open Perfetto UI | Exhaustive JSON scan via Python is more rigorous than a visual inspection; visual inspection is nice-to-have, not load-bearing for this gate |
-| Did not install Nsight Systems | Not needed until Hour 5. Installing it now would be premature |
+| Did not install Nsight Systems | Not needed until Phase 5. Installing it now would be premature |
 | Did not disable TF32 in this run | Baseline should reflect PyTorch default configuration; TF32-off is a separate controlled experiment |
 
 ---
@@ -672,11 +672,11 @@ Out of scope for this cleanup:
 
 ---
 
-## 11. Open items going into Hour 3
+## 11. Open items going into Phase 3
 
 1. README still documents `profile/` and `python profile/run_baseline.py` — needs update to `profiling/` and `python -m profiling.run_baseline`.
 2. `docs/brief.md §5` still shows the old `profile/` layout — same rename needed, with a note about why (stdlib collision).
-3. Hour 3 ports the baseline to MobileNetV3-Small, DistilBERT, and Tiny GRU. Expect:
+3. Phase 3 ports the baseline to MobileNetV3-Small, DistilBERT, and Tiny GRU. Expect:
    - MobileNetV3-Small: depthwise conv kernels with different name shape; TC kernels may be absent entirely due to low channel counts in depthwise layers.
    - DistilBERT: almost no cuDNN at all; the show is cuBLAS GEMM kernels. Many of them TC-TF32 (`cublasLt`), some SIMT.
    - Tiny GRU: a single `cudnnRNNForward`-class kernel dominating the forward pass.
