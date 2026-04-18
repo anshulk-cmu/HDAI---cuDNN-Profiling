@@ -2,7 +2,7 @@
 
 **Course:** EEL71020 — Hardware Design for AI
 **Institution:** Indian Institute of Technology, Jodhpur
-**Authors:** Anshul Kumar (M25AI2036), Neha Prasad (M25AI2076)
+**Authors:** Anshul Kumar (M25AI2036), Neha Prasad (M25AI2056)
 
 ---
 

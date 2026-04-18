@@ -1,7 +1,7 @@
 # cuDNN Profiling Project — Complete Plan
 
 **Course:** EEL71020 — Hardware Design for AI, IIT Jodhpur
-**Authors:** Anshul Kumar (M25AI2036), Neha Prasad (M25AI2076)
+**Authors:** Anshul Kumar (M25AI2036), Neha Prasad (M25AI2056)
 **Target hardware:** RTX 5070 Ti Laptop GPU (Blackwell, sm_120, 12 GB), Windows 11
 **Backup:** Colab Pro (L4 or A100)
 **Time budget:** 10–12 hours end-to-end
