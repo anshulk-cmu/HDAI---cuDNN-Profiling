@@ -5,8 +5,10 @@ For each of the four baseline models, reads:
   - results/nsys/stats/<model>_kern_sum_cuda_gpu_kern_sum.csv  (Nsight Systems)
 
 Computes total GPU-kernel time from each source and prints a comparison table.
-The PyTorch run profiles 10 iters; the Nsight run profiles 40 timing iters
-+ 15 profiler iters at different parameters, so we normalise by iter count.
+The PyTorch run profiles 10 iters (profiler window with schedule active=10).
+The Nsight run captures the full process, so kern_sum aggregates every kernel
+from every forward pass: 10 warmup + 40 timing (2 trials x 20 iters) + 15
+profiler = 65 iters total. We normalise each source by its own iter count.
 """
 import csv
 import os

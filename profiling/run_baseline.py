@@ -123,11 +123,18 @@ def main():
     _print_flags(args)
     model, x = load_model_and_input(args.model, args.batch)
 
+    warmup_start = torch.cuda.Event(enable_timing=True)
+    warmup_end = torch.cuda.Event(enable_timing=True)
     with nvtx.annotate("warmup", color="grey"):
+        warmup_start.record()
         for _ in range(args.warmup):
             with torch.no_grad():
                 _ = model(x)
+        warmup_end.record()
         torch.cuda.synchronize()
+    warmup_ms = warmup_start.elapsed_time(warmup_end)
+    print(f"[warmup] total_ms = {warmup_ms:.2f}  "
+          f"({args.warmup} iters, {warmup_ms / args.warmup:.2f} ms/iter avg)")
 
     with nvtx.annotate("cuda_event_timing", color="blue"):
         trial_means = time_trials(

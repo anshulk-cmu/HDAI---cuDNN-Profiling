@@ -70,7 +70,7 @@ def main():
     rows = []
     for display_name, path in MODELS:
         mid = MODEL_ID[display_name]
-        lat = MODEL_LATENCY[mid]
+        lat = MODEL_LATENCY[mid]['benchOn']
         s = summarise_trace(path)
         row = {
             'model': display_name,

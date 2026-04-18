@@ -692,7 +692,7 @@ Instrumentation: [`profiling/run_baseline.py`](../profiling/run_baseline.py) wra
 
 <img src="../results/plots/nsight_resnet18_one_inference.png" alt="ResNet-18 one inference" width="820">
 
-**Figure 5.6.1b. ResNet-18 single inference (iter_05 = 10.979 ms).** One full iter fills the frame, with iter_04 and iter_06 visible at the edges for context. The measured 10.979 ms is inside the 11.71 ± 0.61 ms band reported in §4.1, providing a direct visual cross-check of the baseline methodology. The long `cudaDeviceSynchronize` bar on the CUDA API row is the explicit `torch.cuda.synchronize()` call at the end of each profiled iter (see [`profiling/run_baseline.py`](../profiling/run_baseline.py)); Nsight attributes it to the host thread, not the GPU kernel row. The `cuBLAS` row is nearly empty, consistent with §4.1's `matmul_fp32 = 0.14 %`.
+**Figure 5.6.1b. ResNet-18 single inference (iter_05 = 10.979 ms).** One full iter fills the frame, with iter_04 and iter_06 visible at the edges for context. The measured 10.979 ms sits about 1.2 σ below the 11.71 ± 0.61 ms mean reported in §4.1 — within the 95 % CI of the baseline distribution and consistent with sampling variation across single iterations, providing a direct visual cross-check of the baseline methodology. The long `cudaDeviceSynchronize` bar on the CUDA API row is the explicit `torch.cuda.synchronize()` call at the end of each profiled iter (see [`profiling/run_baseline.py`](../profiling/run_baseline.py)); Nsight attributes it to the host thread, not the GPU kernel row. The `cuBLAS` row is nearly empty, consistent with §4.1's `matmul_fp32 = 0.14 %`.
 
 </div>
 

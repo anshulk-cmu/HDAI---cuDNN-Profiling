@@ -43,15 +43,29 @@ MODELS = [
 
 # Keyed by short model id (= first token of display name, lowercased) — matches
 # the filename stem used by run_baseline.py (resnet18/mobilenetv3/distilbert/gru).
+# Nested by benchmark state: 'benchOn' is the Phase-3 committed baseline;
+# 'benchOff' is filled in by Phase 6 (analysis/benchmark_toggle_summary.py).
 MODEL_LATENCY = {
-    'resnet18':    {'batch': 32, 'mean_ms': 11.710, 'std_ms': 0.609,
-                    'samples_per_sec': 2732.7},
-    'mobilenetv3': {'batch': 32, 'mean_ms':  3.006, 'std_ms': 0.180,
-                    'samples_per_sec': 10644.2},
-    'distilbert':  {'batch':  8, 'mean_ms': 12.355, 'std_ms': 0.436,
-                    'samples_per_sec': 647.5},
-    'gru':         {'batch': 32, 'mean_ms':  0.252, 'std_ms': 0.010,
-                    'samples_per_sec': 127003.4},
+    'resnet18': {
+        'benchOn':  {'batch': 32, 'mean_ms': 11.710, 'std_ms': 0.609,
+                     'samples_per_sec': 2732.7},
+        'benchOff': None,
+    },
+    'mobilenetv3': {
+        'benchOn':  {'batch': 32, 'mean_ms':  3.006, 'std_ms': 0.180,
+                     'samples_per_sec': 10644.2},
+        'benchOff': None,
+    },
+    'distilbert': {
+        'benchOn':  {'batch':  8, 'mean_ms': 12.355, 'std_ms': 0.436,
+                     'samples_per_sec': 647.5},
+        'benchOff': None,
+    },
+    'gru': {
+        'benchOn':  {'batch': 32, 'mean_ms':  0.252, 'std_ms': 0.010,
+                     'samples_per_sec': 127003.4},
+        'benchOff': None,
+    },
 }
 
 # Short id used in filenames, keyed by display name.
@@ -221,10 +235,10 @@ def plot_cross_model_latency_throughput(out_path):
     """
     names = [n for n, _ in MODELS]
     ids = [MODEL_ID[n] for n in names]
-    lat_mean = [MODEL_LATENCY[i]['mean_ms'] for i in ids]
-    lat_std = [MODEL_LATENCY[i]['std_ms'] for i in ids]
-    thr = [MODEL_LATENCY[i]['samples_per_sec'] for i in ids]
-    batches = [MODEL_LATENCY[i]['batch'] for i in ids]
+    lat_mean = [MODEL_LATENCY[i]['benchOn']['mean_ms'] for i in ids]
+    lat_std = [MODEL_LATENCY[i]['benchOn']['std_ms'] for i in ids]
+    thr = [MODEL_LATENCY[i]['benchOn']['samples_per_sec'] for i in ids]
+    batches = [MODEL_LATENCY[i]['benchOn']['batch'] for i in ids]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12.0, 4.2))
 
