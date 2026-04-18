@@ -31,10 +31,26 @@ The deliverable is a profiling report + plots + this small repo of scripts.
 | Phase 0 — brief read, hardware/spec corrections | Complete | [`docs/brief.md`](docs/brief.md), [`docs/execution_log_0.md`](docs/execution_log_0.md) |
 | Phase 1 — conda env, toolchain, smoke tests | Complete | [`env/check_env.py`](env/check_env.py), [`env/sanity_conv.py`](env/sanity_conv.py), [`docs/execution_log_0.md`](docs/execution_log_0.md) |
 | Phase 2 — ResNet-18 baseline profile (first pass) | Superseded | [`docs/execution_log_1.md`](docs/execution_log_1.md) |
-| Phase 2 rework — bug fixes, multi-trial rerun, analysis plots | Complete | [`docs/execution_log_2.md`](docs/execution_log_2.md), `results/traces/resnet18_baseline_bs32_benchOn.json`, `results/plots/resnet18_*.png` |
-| Phases 3–12 (other models, experiments, writeup) | Pending | — |
+| Phase 2 rework — bug fixes, multi-trial rerun, analysis plots | Complete | [`docs/execution_log_2.md`](docs/execution_log_2.md), `results/traces/resnet18_baseline_bs32_benchOn.json` |
+| Phase 3 — baseline port to MobileNetV3, DistilBERT, GRU + cross-model plots | Complete | [`docs/execution_log_3.md`](docs/execution_log_3.md), 3 new traces, 8 plots under [`results/plots/`](results/plots/) |
+| Phase 4 — kernel classification, 4-model summary table | Pending | — |
+| Phase 5 — Nsight Systems timeline | Blocked (Nsight install) | — |
+| Phases 6–12 (experiments, roofline, writeup) | Pending | — |
 
-### Headline findings so far (ResNet-18, batch 32, FP32, `cudnn.benchmark=True`, reworked run — see `docs/execution_log_2.md`)
+### Headline findings so far (four-model baseline — see `docs/execution_log_2.md` for ResNet-18, `docs/execution_log_3.md` for the other three)
+
+**Cross-model table (batch per `DEFAULT_BATCH`, FP32+TF32, `cudnn.benchmark=True`):**
+
+| Model | Batch | Latency (ms) | Throughput (samples/s) | TF32 Tensor-Core share |
+|---|---:|---:|---:|---:|
+| ResNet-18 | 32 | 11.71 ± 0.61 | 2 733 | **58.45 %** |
+| MobileNetV3-Small | 32 |  3.01 ± 0.18 | 10 644 | 14.94 % |
+| DistilBERT-base |  8 | 12.36 ± 0.44 | 647 (82 880 tokens/s) | **0.00 %** |
+| Tiny GRU | 32 |  0.25 ± 0.01 | 127 003 | 16.77 % |
+
+Plots: [`cross_model_category_stacked.png`](results/plots/cross_model_category_stacked.png), [`cross_model_latency_throughput.png`](results/plots/cross_model_latency_throughput.png), [`cross_model_tc_share.png`](results/plots/cross_model_tc_share.png).
+
+### ResNet-18 findings (from the reworked run)
 
 - **Inference latency:** **11.71 ± 0.61 ms** / batch of 32 → **≈ 2 733 images/sec** on the RTX 5070 Ti Laptop GPU, measured as the mean over **7 trials × 50 iterations** of CUDA-event timing after 30 warm-ups. (The first-pass single-window number was 9.79 ms on a cold chip; the new number captures steady-state thermal behaviour and is the headline going forward.)
 - **Conv dominates, as expected:** `aten::cudnn_convolution` accounts for **79.42 %** of CUDA time; BatchNorm 8.52 %, ReLU 5.80 %, MaxPool 3.13 %, residual `add_` 2.85 %, FC 0.14 %.
@@ -50,6 +66,14 @@ The deliverable is a profiling report + plots + this small repo of scripts.
   2. Running `python profiling/run_baseline.py` breaks cross-package imports because `sys.path[0]` becomes the script's folder. Canonical invocation is `python -m profiling.run_baseline …` from the repo root.
 
 A controlled TF32-off re-profile is queued as a future experiment to quantify how much of the Winograd-vs-implicit-GEMM flip is driven by TF32 specifically.
+
+### Phase 3 findings — three more models
+
+- **MobileNetV3-Small (3.01 ms / 10 644 img/s).** Regular conv 31.7 %, depthwise conv 25.7 %, **BN 21.8 %** (much higher than the brief's "10 % misc" prediction — BN amortises badly over tiny convs), hardswish activation 5.6 %, TC share drops to 14.9 %. Depthwise conv routes through PyTorch-native kernels (`aten::_conv_depthwise2d`), not cuDNN.
+- **DistilBERT-base (12.36 ms / 648 samples/s).** 91.89 % in `aten::addmm` backed by **MAGMA's `magma_sgemmEx_kernel`**, *not* cuBLAS as the brief predicted. **Zero Tensor-Core engagement** at FP32. Attention is fully fused into a single `fmha_cutlassF_f32_aligned_64x64_rf_sm80` FlashAttention kernel (4.66 %) — no separate softmax row. This is the strongest finding so far: DistilBERT was meant to be the TC showcase and delivered 0 % TC share instead.
+- **Tiny GRU (0.25 ms / 127 003 samples/s).** `aten::_cudnn_rnn` at 96.1 %, with the persistent `RNN_blockPersist_fp_GRU` kernel alone taking 73.3 %. Unexpected TC engagement (16.8 %) via `cutlass_80_tensorop_s1688gemm_128x256` on the input-to-hidden matmul — brief predicted "memory-bound, modest TC"; "modest" holds.
+
+Two brief predictions fail outright (MobileNetV3 kernel distribution — BN underestimated; DistilBERT library dispatch — MAGMA won over cuBLAS). Both are real findings that go into the writeup.
 
 ---
 
@@ -173,15 +197,18 @@ HDAI_Project/
 │   └── sanity_conv.py          # 10-line conv to confirm cuDNN dispatch
 ├── models/
 │   ├── __init__.py
-│   └── resnet.py               # ResNet-18 loader; further models added in Phase 3
+│   ├── resnet.py               # ResNet-18 loader
+│   ├── mobilenet.py            # MobileNetV3-Small loader (Phase 3)
+│   ├── distilbert.py           # DistilBERT-base loader (Phase 3)
+│   └── gru.py                  # TinyGRU 2-layer loader (Phase 3)
 ├── profiling/                  # NOTE: renamed from `profile/` to avoid stdlib collision
 │   ├── __init__.py
-│   └── run_baseline.py         # multi-trial CUDA-event timing + profiler trace
+│   └── run_baseline.py         # multi-trial CUDA-event timing + profiler trace; MODEL_LOADERS dispatch
 ├── analysis/
 │   ├── __init__.py
 │   ├── parse_trace.py          # chrome-trace JSON -> per-kernel (time, #calls)
 │   ├── classify_kernels.py     # kernel-name -> coarse category
-│   └── plots.py                # Phase-2 ResNet-18 breakdown + conv-algo charts
+│   └── plots.py                # per-model breakdowns + cross-model comparison plots
 ├── results/
 │   ├── traces/                 # chrome-trace JSONs (committed)
 │   └── plots/                  # analysis PNGs (committed)
@@ -204,15 +231,23 @@ Scripts live in packages (`models/`, `profiling/`, `analysis/`) and are invoked 
 python env/check_env.py
 python env/sanity_conv.py
 
-# Baseline (Phase 2 — currently only ResNet-18 is wired up)
+# Conda-env SSL_CERT_FILE workaround (needed for DistilBERT HF download on this machine)
+unset SSL_CERT_FILE
+
+# All four baselines (batch auto-defaults per DEFAULT_BATCH; DistilBERT = 8, others = 32)
 python -m profiling.run_baseline --model resnet18
+python -m profiling.run_baseline --model mobilenetv3
+python -m profiling.run_baseline --model distilbert
+python -m profiling.run_baseline --model gru
+
+# Alternate configurations
 python -m profiling.run_baseline --model resnet18 --no-benchmark   # benchmark-off control
 python -m profiling.run_baseline --model resnet18 --batch 64       # different batch
 
 # Analysis: per-kernel table of a saved trace
 python -m analysis.parse_trace results/traces/resnet18_baseline_bs32_benchOn.json
 
-# Analysis: render Phase-2 plots (kernel-category breakdown + conv-algorithm split)
+# Analysis: render all 8 plots (4 per-model breakdowns + 3 cross-model + ResNet conv-algo)
 python -m analysis.plots
 
 # Nsight capture (Phase 5, blocked on a separate install)
@@ -220,7 +255,7 @@ python -m analysis.plots
 #     python -m profiling.run_baseline --model resnet18
 ```
 
-Phase 3 onwards (additional models, benchmark-toggle / AMP / batch-sweep drivers, Nsight captures) will add more CLI entry points under `profiling/` and `analysis/`.
+Phase 4 onwards (kernel classification summary CSV, Phase-6 benchmark-toggle experiment, Phase-7 AMP, Phase-8 batch sweep, Nsight captures) will add more CLI entry points under `profiling/` and `analysis/`.
 
 ---
 

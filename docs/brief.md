@@ -18,8 +18,8 @@
 | Repo scaffolding (section 5) | [x] done | `profile/` renamed to `profiling/` — see §11 gotcha |
 | Phase 2 — first profile on ResNet-18 | [x] done (superseded by rework) | 97.923 ms CUDA / 10 iters @ batch 32 on cold chip. See `execution_log_1.md`. |
 | Phase 2 rework — bug fixes, multi-trial rerun, plots | [x] done | 11.71 ± 0.61 ms mean / 2 733 img/s (7 trials × 50 iters). Bugs in `run_baseline.py` fixed. Plots in `results/plots/`. See `execution_log_2.md`. |
-| Phase 3 — port to MobileNetV3 / DistilBERT / GRU | [ ] next | reuse the `run_baseline.py` harness, add model loaders |
-| Phase 4 — kernel classification | [ ] partial | `analysis/classify_kernels.py` + `parse_trace.py` + `plots.py` added in log_2 for ResNet-18 only; extend to four models in Phase 3 |
+| Phase 3 — port to MobileNetV3 / DistilBERT / GRU | [x] done | 4 baselines complete. MobileNetV3 @ 3.01 ms (TC 15%, BN 22%), DistilBERT @ 12.36 ms (**0% TC — MAGMA dispatch, not cuBLAS**), GRU @ 0.25 ms (persistent RNN + TC input matmul). See `execution_log_3.md`. |
+| Phase 4 — kernel classification | [ ] partial | `classify_kernels.py` + `parse_trace.py` + `plots.py` cover 4 models at per-category level (cross-model stacked bar rendered in Phase 3). Remaining: CSV summary table, `conv_depthwise` / `fused_attention` classifier buckets. |
 | Phase 5 — Nsight Systems timeline | [ ] blocked on Nsight install | |
 | Phase 6 — `cudnn.benchmark` toggle | [ ] pending | `run_baseline.py` now supports `--no-benchmark` (log_2 fix) |
 | Phase 7 — FP32 vs FP16 (AMP) | [ ] pending | |
@@ -31,13 +31,24 @@
 
 **Extra experiment queued (not in original plan):** TF32-off re-profile of ResNet-18 (`torch.backends.cuda.matmul.allow_tf32 = False` + `torch.backends.cudnn.allow_tf32 = False`). Expected to make Winograd competitive again; would be a strong paired-bar figure for the writeup.
 
-### Findings so far (end of Phase 2 rework, one model profiled — see `execution_log_2.md`)
+### Findings so far (end of Phase 3, four models profiled — see `execution_log_3.md` for cross-model)
 
-- **ResNet-18 latency @ batch 32, FP32 default:** 11.71 ± 0.61 ms/iter (7 trials × 50 iters) → ~2 733 img/s at steady state. First-pass cold-chip number was 9.79 ms → 3 267 img/s.
-- **Conv is 79.42 %** of CUDA time, as predicted.
-- **Winograd predicted, TF32 Tensor-Core implicit-GEMM observed.** The brief's §1 prediction ("almost every conv layer gets Winograd") does not hold on Blackwell + cuDNN 9.10.2 + PyTorch's default TF32-on config. Top kernels are `cutlass_tensorop_s1688fprop_optimized_tf32_...` and two layout variants of `sm80_xmma_fprop_implicit_gemm_tf32f32_...`. This is a genuine, documented finding, not a profiling bug.
-- **TF32 is active by default** because PyTorch enables `allow_tf32=True` on `sm_80+`. "FP32 inference" on Blackwell silently uses Tensor Cores in TF32 math mode.
-- **Layout-conversion kernels eat 9.52 %** of CUDA time (450 NCHW↔NHWC converts per 10 iterations). Motivates doing the `channels_last` experiment (§8.5) sooner.
+**Four-model latency/TC summary (batch per DEFAULT_BATCH, FP32+TF32, benchmark=True):**
+
+| Model | Batch | Latency (ms) | Throughput (samples/s) | TC share |
+|---|---:|---:|---:|---:|
+| ResNet-18 | 32 | 11.71 ± 0.61 | 2 733 | 58.45 % |
+| MobileNetV3-Small | 32 |  3.01 ± 0.18 | 10 644 | 14.94 % |
+| DistilBERT-base |  8 | 12.36 ± 0.44 | 647 | **0.00 %** |
+| Tiny GRU | 32 |  0.25 ± 0.01 | 127 003 | 16.77 % |
+
+**Key findings:**
+
+- **ResNet-18:** 79.42 % conv; Winograd predicted but TF32 Tensor-Core implicit-GEMM observed; layout-converts eat 9.52 % of CUDA time (motivates `channels_last` sooner).
+- **MobileNetV3-Small:** BN unexpectedly large (21.83 %) because it amortises badly over tiny convs; depthwise conv (25.71 %) routes through PyTorch-native kernels, not cuDNN; TC share drops to 15 % (only pointwise 1×1 convs are TC-eligible).
+- **DistilBERT-base:** 91.89 % of time in `aten::addmm` backed by **MAGMA** (not cuBLAS as brief predicted); **0 % Tensor-Core engagement** at FP32; attention fully fused via `fmha_cutlassF_f32_aligned_64x64_rf_sm80` FlashAttention. Strongest finding of the study so far — dispatcher routed matmuls to a non-TC library.
+- **Tiny GRU:** cuDNN's persistent-RNN kernel (`RNN_blockPersist_fp_GRU`) dominates at 73.33 %; 16.77 % of time in `cutlass_80_tensorop_s1688gemm_128x256` on the input-to-hidden matmul (partial TC engagement).
+- **TF32 default on sm_80+** means "FP32 inference" means four different things for the four models. One flag, four regimes.
 
 ### Environment subsections completed
 

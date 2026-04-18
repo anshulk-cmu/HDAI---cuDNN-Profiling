@@ -19,8 +19,37 @@ def _load_resnet18(batch):
     return get_model(), get_input(batch)
 
 
+def _load_mobilenetv3(batch):
+    from models.mobilenet import get_model, get_input
+    return get_model(), get_input(batch)
+
+
+def _load_distilbert(batch):
+    from models.distilbert import get_model, get_input
+    return get_model(), get_input(batch)
+
+
+def _load_gru(batch):
+    from models.gru import get_model, get_input
+    return get_model(), get_input(batch)
+
+
 MODEL_LOADERS = {
-    'resnet18': _load_resnet18,
+    'resnet18':    _load_resnet18,
+    'mobilenetv3': _load_mobilenetv3,
+    'distilbert':  _load_distilbert,
+    'gru':         _load_gru,
+}
+
+
+# Per-model default batch when --batch is not explicitly provided on the CLI.
+# DistilBERT's smaller default reflects its 66M-parameter footprint under the
+# 12GB VRAM cap (brief §1.3); the other three scale fine at 32.
+DEFAULT_BATCH = {
+    'resnet18':    32,
+    'mobilenetv3': 32,
+    'distilbert':  8,
+    'gru':         32,
 }
 
 
@@ -54,7 +83,8 @@ def time_trials(model, x, n_trials=7, iters_per_trial=50):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--model', required=True)
-    ap.add_argument('--batch', type=int, default=32)
+    ap.add_argument('--batch', type=int, default=None,
+                    help="Batch size. Defaults to DEFAULT_BATCH[model] if omitted.")
     ap.add_argument(
         '--benchmark', action=argparse.BooleanOptionalAction, default=True,
         help="Enable torch.backends.cudnn.benchmark (default: on). "
@@ -63,6 +93,9 @@ def main():
     ap.add_argument('--iters-per-trial', type=int, default=50)
     ap.add_argument('--warmup', type=int, default=30)
     args = ap.parse_args()
+
+    if args.batch is None:
+        args.batch = DEFAULT_BATCH[args.model]
 
     torch.backends.cudnn.benchmark = args.benchmark
     model, x = load_model_and_input(args.model, args.batch)
