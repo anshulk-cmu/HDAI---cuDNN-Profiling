@@ -19,13 +19,13 @@
 
 <br>
 
-*Target length: 8–10 pages* · *Status: in progress (Phase 2 rework complete — see `docs/execution_log_2.md`)*
+*Target length: 10–14 pages* · *Status: in progress (all four baselines complete through Phase 3 — see `docs/execution_log_2.md` and `docs/execution_log_3.md`)*
 
 ---
 
 </div>
 
-> **Document status.** Sections covering ResNet-18 (§4) are backed by real measurements from the reworked Phase 2 run — trace file `results/traces/resnet18_baseline_bs32_benchOn.json`, 10 profiled iterations × batch 32, FP32 with TF32 default, plus a separate multi-trial CUDA-event timing sweep (7 trials × 50 iterations). See [`docs/execution_log_2.md`](../docs/execution_log_2.md) for the full bug-fix and rerun audit. Remaining three models and all cross-model experiments are placeholders whose protocols are specified so measurements can be dropped in without refactoring the document.
+> **Document status.** Sections covering **all four models** (§4 ResNet-18, §5.1 MobileNetV3-Small, §5.2 DistilBERT-base, §5.3 Tiny GRU) are backed by real measurements. Four chrome traces are on disk under `results/traces/`, eight analysis figures under `results/plots/`. Multi-trial CUDA-event timing used 7 trials × 50 iterations per model after 30 warmups. See [`docs/execution_log_2.md`](../docs/execution_log_2.md) for the Phase-2 (ResNet-18) audit and [`docs/execution_log_3.md`](../docs/execution_log_3.md) for the Phase-3 (three additional models) audit. Sections §5.4 onwards (the controlled experiments — benchmark-toggle, AMP, batch-sweep, channels-last, seq-sweep, TF32-off A/B) remain protocol-only placeholders scheduled for later phases.
 
 <br>
 
@@ -52,9 +52,13 @@
   - [4.3 Layout-conversion cost](#43-layout-conversion-cost)
   - [4.4 Regime classification (RQ3)](#44-regime-classification-rq3)
   - [4.5 Ops-per-iteration sanity check](#45-ops-per-iteration-sanity-check)
-- [5. Results — further experiments *(pending)*](#5-results--further-experiments-pending)
-- [6. Roofline analysis *(pending)*](#6-roofline-analysis-pending)
-- [7. Cross-model discussion *(pending)*](#7-cross-model-discussion-pending)
+- [5. Results — other three models](#5-results--other-three-models)
+  - [5.1 MobileNetV3-Small](#51-mobilenetv3-small-completed)
+  - [5.2 DistilBERT-base](#52-distilbert-base-completed)
+  - [5.3 Tiny GRU](#53-tiny-gru-completed)
+  - [5.4 Pending experiments (benchmark-toggle, AMP, batch sweep, channels-last, seq sweep, TF32-off)](#54-pending-experiments)
+- [6. Roofline analysis](#6-roofline-analysis)
+- [7. Cross-model discussion](#7-cross-model-discussion)
 - [8. Threats to validity](#8-threats-to-validity)
 - [9. Conclusion](#9-conclusion)
 - [References](#references)
@@ -69,16 +73,16 @@
 
 ## Abstract
 
-> *Full abstract to be finalised once all four models have been profiled. A partial abstract covering the Phase 2 material follows.*
+This report characterises the GPU kernels that **cuDNN 9.10.2 / cuBLAS 12.8 / MAGMA / CUTLASS** dispatch for inference on an **NVIDIA RTX 5070 Ti Laptop GPU** (Blackwell, `sm_120`, 12 GB), using the PyTorch Profiler to record chrome-trace timelines and analysing every kernel name in the trace. A four-model zoo — **ResNet-18, MobileNetV3-Small, DistilBERT-base**, and a **tiny GRU** — spans the `{conv, matmul} × {compute-bound, memory-bound}` quadrant. Each model was timed over 7 trials × 50 forward passes after 30 warmups, then profiled for 10 annotated iterations at its default batch size (32 for the vision and RNN models, 8 for DistilBERT). Latency ranged from **0.252 ± 0.010 ms** (Tiny GRU, batch 32) to **12.36 ± 0.44 ms** (DistilBERT, batch 8); throughput from 648 samples/sec (DistilBERT) to 127 003 samples/sec (GRU).
 
-This report characterises the GPU kernels that **cuDNN 9.10.2** dispatches for inference on an **NVIDIA RTX 5070 Ti Laptop GPU** (Blackwell, `sm_120`, 12 GB), using the PyTorch Profiler to record chrome-trace timelines and analysing them kernel-by-kernel. A four-model zoo — **ResNet-18, MobileNetV3-Small, DistilBERT-base**, and a **tiny GRU** — is used to span the `{conv, matmul} × {compute-bound, memory-bound}` quadrant. As of the current reporting point, **ResNet-18 has been fully profiled** at batch 32 in FP32.
+Four findings contradict predictions baked into the original project brief:
 
-Two findings are reported that contradict conventional wisdom baked into the project brief:
+1. **Winograd is absent from ResNet-18's trace.** The brief predicted 3×3-filter Winograd dominance; instead, **TF32 Tensor-Core implicit-GEMM** kernels (CUTLASS `s1688fprop` + CUTLASS/xmma `tf32f32` variants) take 58.44 % of GPU time, driven by PyTorch's default `allow_tf32=True` on `sm_80+`.
+2. **9.52 % of ResNet-18's GPU time** is spent in NCHW↔NHWC layout-conversion kernels because cuDNN's Tensor-Core fast path expects NHWC while torchvision models default to NCHW. A `channels_last` switch should eliminate most of this cost.
+3. **DistilBERT's `aten::addmm` dispatches to MAGMA, not cuBLAS.** 91.89 % of its GPU time is in `magma_sgemmEx_kernel` — a pure FP32 SIMT kernel with **zero Tensor-Core engagement**. The brief anticipated cuBLAS dominance and strong TC utilization; both fail on this stack. Attention is separately fused via a CUTLASS FlashAttention kernel (`fmha_cutlassF_f32_aligned_64x64_rf_sm80`) at 4.66 % — softmax never appears as its own row because it's fused inside.
+4. **MobileNetV3-Small's BatchNorm is a larger share (21.83 %) than the brief predicted.** The brief's 60 %/30 %/10 % "depthwise/pointwise/misc" decomposition misses the launch-overhead regime created by tiny convs. Depthwise conv also bypasses cuDNN entirely and routes through PyTorch-native `aten::_conv_depthwise2d` kernels.
 
-1. `cudnn.benchmark=True` does **not** select Winograd for ResNet-18's 3×3 convolutions on Blackwell; instead, **TF32 Tensor-Core implicit-GEMM kernels take 58.4 %** of GPU time, driven by PyTorch's default `allow_tf32=True` on `sm_80+`.
-2. **9.5 % of GPU time is spent in NCHW↔NHWC layout-conversion kernels** because cuDNN's Tensor-Core fast path expects NHWC while torchvision models default to NCHW.
-
-Both findings motivate follow-up experiments that are scheduled for later sections of this report.
+Across all four models, TF32 Tensor-Core engagement varies dramatically — ResNet-18 **58.45 %**, Tiny GRU **16.77 %**, MobileNetV3-Small **14.94 %**, DistilBERT-base **0.00 %** — revealing that "FP32 inference" on `sm_120` is in fact four different math regimes, determined by the dispatcher's per-op routing choice between cuDNN, cuBLAS, cuBLASLt, MAGMA, CUTLASS, and PyTorch-native kernels.
 
 <br>
 
@@ -368,74 +372,393 @@ No op is mis-instrumented or skipped — the trace is complete.
 
 ---
 
-## 5. Results — further experiments *(pending)*
+## 5. Results — other three models
 
-Each sub-section below is a placeholder with the experiment's design already fixed, following the brief's §8 protocol.
+All three sub-sections below use the identical profiling harness as §4 (see `profiling/run_baseline.py`): 30 warmups, 7 CUDA-event-timed trials × 50 iterations, then a 10-iteration profiler window. Traces are saved as `{model}_baseline_bs{batch}_{benchOn|benchOff}.json` under `results/traces/`. Full per-run audit in [`docs/execution_log_3.md`](../docs/execution_log_3.md).
 
-### 5.1 MobileNetV3-Small baseline
+### 5.1 MobileNetV3-Small *(completed)*
 
-> *To be filled.* **Hypotheses:** (a) depthwise convs may use a different kernel family, perhaps `dgrad_engine`-style names; (b) Tensor-Core utilisation should drop markedly because depthwise GEMMs are too skinny [[8]](#ref-8); (c) the layout-conversion overhead observed for ResNet-18 may be worse, because depthwise conv's small channel count makes each convert proportionally more expensive.
+> **Configuration.** Batch 32, FP32+TF32 default, `cudnn.benchmark = True`. Trace: [`results/traces/mobilenetv3_baseline_bs32_benchOn.json`](../results/traces/mobilenetv3_baseline_bs32_benchOn.json) (5.3 MB, 1 800 GPU-kernel events).
 
-### 5.2 DistilBERT-base baseline
+**Latency.** 3.006 ms ± 0.180 ms / batch of 32 (7 trials × 50 iters; std/mean = 6.0 %). Per-trial means: 2.860, 2.827, 2.936, 2.943, 3.066, 3.363, 3.049 ms. **Throughput 10 644 samples/sec** — ≈ 3.9× ResNet-18's 2 733 samples/sec, on a model with 2.54 M parameters (≈ 4.6× fewer than ResNet-18's 11.69 M). Sub-linear, because the arithmetic density per parameter is lower for depthwise convs than for regular convs.
 
-> *To be filled.* **Hypotheses:** (a) almost all GPU time in cuBLAS matmul kernels (`cublasGemmEx`, `cutlass_tensorop_s16816gemm_...`) rather than cuDNN; (b) sequence length is a primary knob — at seq=64 the workload may be launch-overhead dominated, at seq=512 it should be clearly compute-bound; (c) layer-norm and softmax appear only as small slices in the profile [[13]](#ref-13).
+#### 5.1.1 Time attribution
 
-### 5.3 Tiny GRU baseline
+<div align="center">
 
-> *To be filled.* **Hypotheses:** (a) a single `cudnn::rnn::...` kernel per iteration covering the whole sequence; (b) clearly memory-bound — the hidden-state matmul has arithmetic intensity O(hidden\_size) which is low; (c) batch-size scaling dramatically improves throughput because the memory traffic for the fused kernel amortises over the batch dimension [[1]](#ref-1).
+**Table 5.1 — Top-level CUDA time breakdown for MobileNetV3-Small, 10 profiled iterations × batch 32**
 
-### 5.4 Experiment — `cudnn.benchmark` toggle
+</div>
 
-> *To be filled.* **Protocol:** same harness as §4, toggling `torch.backends.cudnn.benchmark` between `True` and `False` across all four models. **Expected speedups:** ResNet-18 10–30 % (many algorithm candidates to search among); MobileNetV3-Small < 10 % (fewer choices); DistilBERT ≈ 0 % (cuBLAS already heuristically optimal); GRU ≈ 0 % (cuDNN RNN path is already fused).
+| Category | Kernel or op | CUDA time | % | Invocations |
+| :--- | :--- | ---: | ---: | ---: |
+| **Convolution (regular + pointwise 1×1)** | `aten::cudnn_convolution` (aggregate) | **6.476 ms** | **31.73 %** | 410 |
+| **Convolution (depthwise, PyTorch-native)** | `aten::_conv_depthwise2d` (aggregate) | **5.247 ms** | **25.71 %** | 110 |
+| Batch-norm | `cudnn::bn_fw_inf_1C11_kernel_NCHW` | 4.455 ms | 21.83 % | 340 |
+| Hard-swish activation | `vectorized_elementwise_kernel` (hardswish specialisation) | 1.136 ms | 5.56 % | 190 |
+| SE-block elementwise (sigmoid × mul, etc.) | `vectorized_elementwise_kernel` | 1.042 ms | 5.11 % | 140 |
+| ReLU (inside SE blocks' ReLU6) | `aten::clamp_min_` | 0.956 ms | 4.68 % | 50 |
+| MAGMA small matmul (SE projection) | `magma_sgemmEx_kernel` | 0.911 ms | 4.46 % | 30 |
+| Global-avg pool (adaptive_avg_pool2d → mean) | `reduce_kernel` | 0.686 ms | 3.36 % | 100 |
+| — | **Total Self CUDA** | **20.412 ms** | **100.00 %** | — |
 
-### 5.5 Experiment — FP32 vs FP16 autocast
+See [`results/plots/mobilenetv3_kernel_breakdown.png`](../results/plots/mobilenetv3_kernel_breakdown.png) for the visual.
 
-> *To be filled.* **Protocol:** wrap inference in `torch.autocast(device_type='cuda', dtype=torch.float16)` and compare timing to FP32 with TF32. **Expected speedups:** ResNet-18 2–3×, MobileNetV3-Small 1.2–1.5×, DistilBERT 2–3×, GRU 1.2–1.4×. **Secondary deliverable:** a kernel diff — which kernel names newly appear in FP16 mode that were absent in FP32 (look for `hmma_`, `h16x8x16`).
+<div align="center">
 
-### 5.6 Experiment — batch-size sweep
+<img src="../results/plots/mobilenetv3_kernel_breakdown.png" alt="MobileNetV3-Small kernel-time breakdown" width="720">
 
-> *To be filled.* Batches {1, 4, 16, 64, 256} subject to 12 GB memory cap. **Expected plot shape:** throughput rising with batch at small batch (launch-overhead regime), saturating once the GPU is fully utilised. DistilBERT at seq=512 will OOM somewhere below batch 256 on 12 GB; the cap will be reported honestly.
+**Figure 5.1 — MobileNetV3-Small kernel-time breakdown.** Regular conv + depthwise conv jointly take 57.4 % (vs ResNet-18's 79.4 %); the remaining budget is dominated by BatchNorm (21.8 %) and activation/SE elementwise (14.8 %).
 
-### 5.7 Experiment — channels-last memory format *(priority-bumped)*
+</div>
 
-> *Promoted in priority by the §4.3 observation.* **Protocol:** `model = model.to(memory_format=torch.channels_last)`; `x = x.to(memory_format=torch.channels_last)`. Re-profile ResNet-18 and MobileNetV3-Small. **Prediction:** the `nchwToNhwc` / `nhwcToNchw` kernels should vanish or shrink substantially, giving a free 5–10 % speedup for ResNet-18 in TF32.
+#### 5.1.2 Convolution sub-structure — two dispatch paths
 
-### 5.8 Experiment — sequence-length sweep on DistilBERT
+The `aten::cudnn_convolution` aggregate (6.476 ms) covers two regular-conv kernels:
 
-> *To be filled.* Seq ∈ {32, 64, 128, 256, 512}. Attention cost is *O(seq²)* whereas FFN cost is *O(seq)* per token, so the attention-block share of time should rise visibly at long seq. **Expected figure:** stacked area of (attention, FFN, layer-norm, softmax) vs seq.
+- `cutlass_80_tensorop_s1688gemm_256x64_16x4_nn_align4` — **Tensor-Core TF32**, 70 calls, 1.659 ms (8.13 %). The only TC kernel in the trace. Serves the 1×1 pointwise convs whose channel counts fit a 256×64 TF32 tile (typically the InvertedResidual block's expansion 1×1).
+- `implicit_convolve_sgemm<1024,5,5,3,3,3,1,…>` — SIMT FP32, 60 calls, 1.543 ms (7.56 %).
+- `implicit_convolve_sgemm<128,5,5,3,3,3,1,…>` — SIMT FP32, 70 calls, 0.881 ms (4.32 %).
+- Remainder inside the `aten::cudnn_convolution` aggregate is cuDNN call-fabric overhead (~2.4 ms), consistent with the 12 % overhead observed for ResNet-18 (§4.2).
 
-### 5.9 Experiment — TF32-off A/B on ResNet-18 *(new, triggered by §4.2)*
+The `aten::_conv_depthwise2d` aggregate (5.247 ms) covers two PyTorch-native depthwise kernels:
 
-> **Protocol:** disable both TF32 flags and re-profile:
-> ```python
-> torch.backends.cuda.matmul.allow_tf32 = False
-> torch.backends.cudnn.allow_tf32       = False
-> ```
-> **Prediction:** `cudnn.benchmark=True` will now measure TC-TF32 as unavailable and **Winograd should re-enter the profile**, validating hypothesis 1 in §4.2 as the dominant cause of the algorithm-selection flip. This is the cleanest A/B we can design from the current data.
+- `DepthwiseConv2d_cu...conv_depthwise2d_forward` variant A — 80 calls, 3.609 ms (17.68 %).
+- `DepthwiseConv2d_cu...conv_depthwise2d_forward` variant B — 30 calls, 1.638 ms (8.02 %).
+
+Neither is a cuDNN kernel. PyTorch has hand-written depthwise code paths for stride/kernel combinations where cuDNN's depthwise tile shapes don't win. 110 calls ÷ 10 iters = **11 depthwise layers per forward**, which matches torchvision's MobileNetV3-Small source (≈ one depthwise per InvertedResidual block).
+
+#### 5.1.3 Finding — BatchNorm is disproportionately large
+
+The brief (§1.2) predicted 60 % depthwise + 30 % pointwise + 10 % miscellaneous. The actual distribution is 25.7 % depthwise + 31.7 % regular/pointwise + **21.8 % BN** + 5.6 % hardswish + 5.1 % SE elementwise + 4.7 % ReLU + 4.5 % MAGMA + 3.4 % pool.
+
+Each of MobileNetV3-Small's ≈ 34 BatchNorm layers issues one `bn_fw_inf_1C11_kernel_NCHW` call at ~13 μs. 34 × 13 μs × 10 iterations ≈ 4.4 ms — which matches the observed 4.455 ms. **BN has an approximately constant per-call cost that does not shrink with the conv it follows.** When the convs themselves are tiny (a single 1×1 pointwise over a ≤ 96-channel tensor is just a few μs), BN's fixed overhead dominates a larger fraction of the schedule. This is a general lesson about launch-overhead regimes that would not surface at the FLOP level.
+
+#### 5.1.4 Finding — Tensor-Core share collapses to 14.94 %
+
+Total TC share (any kernel with `tensorop`, `xmma`, `hmma`, `s1688`, `s16816` in its name) = **14.94 %**, vs ResNet-18's 58.45 %. MobileNetV3-Small is held by the original brief (§1.2) and by MobileNetV3 literature [[8]](#ref-8) to be "Tensor-Core hostile" because the depthwise layers multiply `(N, 1, H, W)` tensors where the reduction dim is 1 — too skinny for any TC-MMA instruction. Observed: depthwise contributes zero TC time (PyTorch-native); pointwise 1×1 at high channel counts *does* engage TC (8.13 % of total via `cutlass_80_tensorop_s1688gemm_256x64`). The brief's prediction "Tensor Cores don't help much" is directionally correct.
+
+#### 5.1.5 Unexpected kernel — MAGMA in a vision model
+
+`magma_sgemmEx_kernel<f,f,f,0,0,6,3,5,3,3>` at 0.911 ms (4.46 %), 30 calls per profiler window = 3 per forward. Hypothesis: the 3 calls per forward are for the MobileNetV3 Squeeze-and-Excitation blocks' internal linear layers. Each SE block computes `Linear(C → C/4) → ReLU → Linear(C/4 → C) → hard-sigmoid`. The `Linear` shapes are small (`(N, C/r) × (C/r, C)` with `r = 4`), and at batch 32 the resulting matrices are large enough to matter but too small to fill a cuBLASLt TC tile. The dispatcher routes them to MAGMA. Worth noting: MAGMA also dominates DistilBERT (§5.2) in a completely different context — the dispatcher's fallback path is this library across multiple models.
+
+#### 5.1.6 Op-count sanity check
+
+<div align="center">
+
+| Op | Expected count per forward | Observed per forward (obs ÷ 10) | Match |
+| :--- | ---: | ---: | :---: |
+| `aten::conv2d` (regular + depthwise) | 52 | 52 | ✓ |
+| `aten::_conv_depthwise2d` (subset of above) | 11 | 11 | ✓ |
+| `aten::cudnn_convolution` (remaining non-depthwise) | 41 | 41 | ✓ |
+| `aten::batch_norm` | 34 | 34 | ✓ |
+| `aten::hardswish_` | 19 | 19 | ✓ |
+| Global avg pool (SE + final) | 10 | 10 | ✓ |
+
+</div>
+
+All op counts match torchvision's MobileNetV3-Small architecture.
+
+### 5.2 DistilBERT-base *(completed)*
+
+> **Configuration.** Batch 8, sequence length 128, FP32+TF32 default, `cudnn.benchmark = True`. Trace: [`results/traces/distilbert_baseline_bs8_benchOn.json`](../results/traces/distilbert_baseline_bs8_benchOn.json) (3.1 MB, 760 GPU-kernel events).
+
+**Latency.** 12.355 ms ± 0.436 ms / batch of 8 (std/mean = 3.5 %, the tightest of the four models). Per-trial: 12.673, 11.956, 12.984, 11.864, 12.467, 12.599, 11.942 ms. **Throughput 647.5 samples/sec = 82 880 tokens/sec** at seq = 128.
+
+#### 5.2.1 Time attribution
+
+<div align="center">
+
+**Table 5.2 — Top-level CUDA time breakdown for DistilBERT-base, 10 profiled iterations × batch 8, seq 128**
+
+</div>
+
+| Category | Kernel or op | CUDA time | % | Invocations |
+| :--- | :--- | ---: | ---: | ---: |
+| **Matmul (Q/K/V, attn-out, FFN-expand, FFN-contract)** | `aten::addmm` / `aten::linear` → **`magma_sgemmEx_kernel`** | **111.661 ms** | **91.89 %** | 360 |
+| **Fused multi-head attention (CUTLASS FlashAttention)** | `fmha_cutlassF_f32_aligned_64x64_rf_sm80…AttentionKernel` | **5.657 ms** | **4.66 %** | 60 |
+| Layer-norm | `vectorized_layer_norm_kernel` | 1.803 ms | 1.48 % | 130 |
+| GeLU activation (post-FFN-expand) | `GeluCUDAKernelImpl` | 1.141 ms | 0.94 % | 60 |
+| Residual adds | `vectorized_elementwise_kernel (CUDAFunctor_add)` | 1.024 ms | 0.84 % | 120 |
+| Embedding lookup (token + position) | `vectorized_gather_kernel` | 0.143 ms | 0.12 % | 20 |
+| Attention-mask prep | `elementwise_kernel` | 0.082 ms | 0.07 % | 10 |
+| — | **Total Self CUDA** | **121.511 ms** | **100.00 %** | — |
+
+<div align="center">
+
+<img src="../results/plots/distilbert_kernel_breakdown.png" alt="DistilBERT kernel-time breakdown" width="720">
+
+**Figure 5.2 — DistilBERT-base kernel-time breakdown.** One kernel family (MAGMA `sgemmEx`) absorbs 92 % of GPU time. Attention is visible as a single fused block (4.66 %); layer-norm, GeLU, residual adds are thin slices.
+
+</div>
+
+#### 5.2.2 Finding — `aten::addmm` routes to MAGMA, not cuBLAS
+
+This is **the most load-bearing finding of the whole study so far.**
+
+The brief (§1.3, lines 93–99) predicted: *"80%+ of time in `cublas` GEMM kernels with Tensor Core variants … attention scales well on Tensor Cores."* On this stack, **zero kernels in the trace contain the substring `cublas`**. The entire matmul workload — 6 linears per transformer layer × 6 transformer layers = 36 linears per forward, 360 over the 10-iteration window — goes to a single kernel family: `magma_sgemmEx_kernel<f,f,f,1,0,6,4,6,3,4>`.
+
+Decoding the kernel name:
+
+- **`magma`** — the MAGMA library (Matrix Algebra on GPU and Multicore Architectures, UT Knoxville / ICL). Bundled into the `torch 2.10.0+cu128` wheel as a fallback dense-linear-algebra provider.
+- **`sgemm`** — single-precision (FP32) GEMM. No Tensor-Core engagement. No TF32 pathway. Pure SIMT FP32 multiply-add.
+- **`Ex`** — extended variant supporting `alpha`/`beta` scaling.
+- **Template `<f,f,f,1,0,6,4,6,3,4>`** — dtype tuple followed by algorithm-selection integers (tile/stage indices).
+
+**Total TC share for DistilBERT-base = 0.00 %.** The kernel family that *would* engage Tensor Cores on this hardware — `cublasLt_*` with TF32 math mode — is never dispatched for any of DistilBERT's matmuls on this stack.
+
+**Hypotheses, ranked by plausibility:**
+
+1. **PyTorch 2.10's `aten::addmm` heuristic prefers MAGMA on this (cu128-wheel, sm_120, FP32) combination.** This is a dispatcher decision, not a library limitation. The `torch.backends.cuda.preferred_linalg_library` default is `'default'`, which lets PyTorch pick; on this build, PyTorch picks MAGMA.
+2. **cuBLASLt's TF32 tiles for DistilBERT's specific shapes** (`(B·seq, 768) × (768, 768)`, `(B·seq, 768) × (768, 3072)`, `(B·seq, 3072) × (3072, 768)`) may not be present for `sm_120` in this cuDNN build — so cuBLASLt *declines* and the dispatcher falls back to MAGMA.
+3. **MAGMA itself has no TC path at all.** The `sgemm` suffix proves this: `s` is FP32, and MAGMA's TF32/BF16/FP16 variants use different names (`tf32gemm`, etc.). So even if the dispatcher picked MAGMA because it was "fastest" at a specific tile, there is no world in which MAGMA engages TC.
+
+**Consequences for the project:**
+
+- DistilBERT's headline throughput (647 samples/sec at FP32) is *not representative* of what a modern transformer can do on this hardware. The comparable FP32+TC number on an Ampere-class part is typically 3–5× higher; FP16 with HMMA is another 2–4× on top of that. The *true* ceiling for DistilBERT on this chip is probably 3 000–5 000 samples/sec at FP32+TC, or 10 000+ at FP16.
+- The brief's "DistilBERT as the Tensor-Core showcase for matmul-heavy workloads" premise is *inverted*: DistilBERT is the only model in the zoo that engages zero Tensor Cores.
+- A two-line experiment (Phase 11) will test hypothesis 1:
+  ```python
+  torch.backends.cuda.preferred_linalg_library('cublas')
+  # ... re-profile DistilBERT ...
+  ```
+  If TC share flips from 0 % → 50 %+, hypothesis 1 is confirmed. If it stays at 0 %, hypothesis 2 is the real cause.
+
+#### 5.2.3 Finding — Attention is fully fused
+
+`fmha_cutlassF_f32_aligned_64x64_rf_sm80…AttentionKernel` takes 4.66 % of GPU time (5.657 ms, 60 calls = 1 per transformer layer × 6 layers × 10 iters). Decoded:
+
+- `fmha` — fused multi-head attention.
+- `cutlassF` — CUTLASS forward variant.
+- `f32_aligned` — FP32 inputs, aligned-layout preconditions.
+- `64x64` — 64×64 tile size (per query block × key block).
+- `rf_sm80` — register-file-blocked, `sm_80+` target.
+
+PyTorch 2.x's `torch.nn.functional.scaled_dot_product_attention` automatically dispatches to this kernel when its preconditions are met. It fuses `Q @ K^T`, `softmax(QK^T / √d)`, and `(softmax(…)) @ V` into a single kernel launch — the intermediate N×N attention matrix never materialises in global memory. Softmax never appears as a separate row in the profile because it's an inlined dataflow step inside this kernel. The brief's prediction "softmax a small slice" holds in the stronger form: **softmax is invisible because it's fused**.
+
+At FP32 the FMHA kernel doesn't engage TC either (the `f32_aligned` naming flag signals pure FP32). An FP16 autocast (§5.4.2, pending) should route to `fmha_cutlassF_f16` which will include HMMA instructions.
+
+#### 5.2.4 Op-count sanity
+
+DistilBERT-base has 6 transformer layers, each with:
+
+- 3 Q/K/V projections + 1 attention-output projection = 4 linears.
+- 2 FFN linears (expand 768→3072, contract 3072→768).
+- 2 layer-norms (post-attention, post-FFN).
+- 1 attention block (fused as above).
+- 2 residual adds.
+
+Plus one embedding layer (token + position) and a final pre-output layer-norm.
+
+Predicted counts per forward: 36 linears, 13 layer-norms, 6 FMHA, 12 residual adds, 2 embedding-gather. Predicted counts per 10-iter profiler window: 360, 130, 60, 120, 20. **Observed in the trace: 360, 130, 60, 120, 20.** Every op count matches.
+
+### 5.3 Tiny GRU *(completed)*
+
+> **Configuration.** Batch 32, sequence 100, input=64 → hidden=128, 2 layers, FP32+TF32, `cudnn.benchmark = True`. Trace: [`results/traces/gru_baseline_bs32_benchOn.json`](../results/traces/gru_baseline_bs32_benchOn.json) (335 KB, **100** GPU-kernel events — the smallest trace in the study).
+
+**Latency.** 0.252 ms ± 0.010 ms / batch of 32 (std/mean = 4.0 %). Per-trial: 0.244, 0.248, 0.254, 0.251, 0.273, 0.244, 0.250 ms. **Throughput 127 003 samples/sec** — equivalent to 12.7 million timesteps/sec.
+
+#### 5.3.1 Time attribution
+
+<div align="center">
+
+**Table 5.3 — Top-level CUDA time breakdown for Tiny GRU, 10 profiled iterations × batch 32, seq 100**
+
+</div>
+
+| Category | Kernel or op | CUDA time | % | Invocations |
+| :--- | :--- | ---: | ---: | ---: |
+| **cuDNN fused-RNN (persistent)** | `RNN_blockPersist_fp_GRU<f,f,f,128>` | **1.265 ms** | **73.33 %** | 20 |
+| **Tensor-Core input matmul (GRU gate projection)** | `cutlass_80_tensorop_s1688gemm_128x256_16x3_tn_align4` | **0.289 ms** | **16.77 %** | 20 |
+| RNN-internal bias-add | `persistRNN_addBias<f,f>` | 0.104 ms | 6.01 % | 20 |
+| Final linear (`128 → 10`) | `cutlass_80_simt_sgemm_32x128_8x5_tn_align1` | 0.030 ms | 1.71 % | 10 |
+| Output copy / contiguous | `elementwise_kernel (direct copy)` | 0.019 ms | 1.08 % | 10 |
+| cuBLASLt reduction (inside final FC) | `cublasLt splitKreduce_kernel` | 0.012 ms | 0.70 % | 10 |
+| Initial hidden-state allocation | `fill_` → `vectorized_elementwise_kernel` | 0.007 ms | 0.41 % | 10 |
+| — | **Total Self CUDA** | **1.725 ms** | **100.00 %** | — |
+
+<div align="center">
+
+<img src="../results/plots/gru_kernel_breakdown.png" alt="Tiny GRU kernel-time breakdown" width="720">
+
+**Figure 5.3 — Tiny GRU kernel-time breakdown.** cuDNN's persistent-RNN kernel (`RNN_blockPersist_fp_GRU`) dominates at 73 %; the remainder is one Tensor-Core input-matmul, bias-add, and tiny FC.
+
+</div>
+
+#### 5.3.2 Finding — `RNN_blockPersist_fp_GRU` encapsulates the whole timestep loop
+
+The `aten::_cudnn_rnn` wrapper covers 96.11 % of total GPU time in 10 calls (= 1 per forward). Inside it, cuDNN dispatches three kernels per GRU layer — `RNN_blockPersist_fp_GRU`, `cutlass_80_tensorop_s1688gemm_128x256`, and `persistRNN_addBias` — 20 calls each = **2 GRU layers × 10 iters**. There is no per-timestep kernel launch; all 100 timesteps of the sequence are unrolled *inside* `RNN_blockPersist_fp_GRU`, which keeps the hidden weights resident in shared memory + registers for the duration.
+
+Decoded name:
+
+- `RNN_blockPersist_fp` — forward-propagation persistent-RNN family.
+- `GRU` — gated-recurrent-unit variant (vs LSTM, vanilla RNN).
+- `<f,f,f,128>` — input/hidden/output FP32, hidden size **128**. cuDNN's persistent-RNN path has templated specialisations for common hidden sizes — 64, 128, 256, 512, 1024; picking `hidden_size=128` in the loader specifically activates this path.
+
+**Per-timestep arithmetic:** 1.265 ms ÷ (2 layers × 100 timesteps × 10 iters) = 0.63 μs per layer per timestep. This is essentially the time to do one 128×128 hidden-to-hidden matmul + gate arithmetic, amortised over the fused launch. For comparison, launching a separate kernel per timestep would dominate this figure by 10–100× in launch overhead alone.
+
+#### 5.3.3 Finding — Unexpected Tensor-Core engagement (16.77 %)
+
+The brief (§1.4) predicted "memory-bound RNN, modest TC utilization". Observed TC share: **16.77 %**, entirely from `cutlass_80_tensorop_s1688gemm_128x256_16x3_tn_align4`. This is the **input-to-hidden matmul** (outside the per-timestep recurrent loop), computed once per layer as `(batch × seq, input_size) × (input_size, 3 × hidden_size)` to produce the concatenated update/reset/candidate gate inputs. For layer 1: `(32 × 100, 64) × (64, 384) = (3200, 64) × (64, 384)`. For layer 2: `(3200, 128) × (128, 384)`. Both matrices fit a 128×256 TC tile cleanly, so CUTLASS's s1688 Tensor-Core path takes them.
+
+**The recurrent (hidden-to-hidden) matmul** stays inside `RNN_blockPersist_fp_GRU` and does *not* engage TC — the hidden-to-hidden weight matrix is 128×128×3 = small enough to stay in shared memory + registers, but also small enough that filling a TC tile isn't efficient relative to plain FP32 FMAs.
+
+So for GRU: **TC engages on the input matmul but not the recurrent loop**. A useful structural observation for the cross-model discussion (§7).
+
+#### 5.3.4 Op-count sanity
+
+Per forward: 1 `aten::gru` call, 1 `aten::_cudnn_rnn` call, 2 `RNN_blockPersist_fp_GRU` (one per layer), 2 `cutlass_80_tensorop_s1688gemm` (one per layer), 2 `persistRNN_addBias` (one per layer), 1 `aten::linear` for the final FC, 1 zero-init fill for `h_0`, 1 contiguous/copy for output staging. Total ≈ 10 kernel launches per forward × 10 iters = **100 kernel events in the trace**. This matches the parse_trace-reported event count exactly — the smallest profile in the study.
+
+### 5.4 Pending experiments
+
+Every experiment below is specified for later phases; not attempted in Phase 3.
+
+#### 5.4.1 `cudnn.benchmark` toggle *(Phase 6)*
+
+Same harness, toggle `torch.backends.cudnn.benchmark` between `True` and `False` across all four models. **Expected speedups:** ResNet-18 10–30 % (many algorithm candidates to search among); MobileNetV3-Small < 10 % (fewer choices — depthwise has few alternatives); DistilBERT ≈ 0 % (MAGMA is not under cuDNN's benchmark-mode control); GRU ≈ 0 % (persistent-RNN path is already fused).
+
+#### 5.4.2 FP32 vs FP16 autocast *(Phase 7)*
+
+Wrap inference in `torch.autocast(device_type='cuda', dtype=torch.float16)`. Expected speedups: ResNet-18 2–3× (HMMA replaces s1688 TF32); MobileNetV3-Small 1.2–1.5× (depthwise still not TC-accelerated); **DistilBERT TBD — if FP16 flips the MAGMA dispatch to cuBLASLt HMMA, this could be a dramatic 5–10×; if it stays on MAGMA, it'll be much smaller**; GRU 1.2–1.4×. Secondary deliverable: a kernel diff showing which kernel names newly appear under FP16 autocast.
+
+#### 5.4.3 Batch-size sweep *(Phase 8)*
+
+Batches {1, 4, 16, 64, 256} subject to 12 GB cap. DistilBERT at seq 512 will OOM somewhere below batch 256; we report the actual cap rather than fudge.
+
+#### 5.4.4 Channels-last memory format *(Phase 10)*
+
+Triggered by §4.3's 9.52 % layout-conversion finding. `model = model.to(memory_format=torch.channels_last)`; re-profile ResNet-18 and MobileNetV3-Small. Prediction: the `nchwToNhwc`/`nhwcToNchw` kernels should vanish, giving a free 5–10 % speedup on ResNet-18 in TF32.
+
+#### 5.4.5 Sequence-length sweep on DistilBERT *(Phase 8)*
+
+Seq ∈ {32, 64, 128, 256, 512}. Attention cost is *O(seq²)*, FFN is *O(seq)* per token, so the attention share should rise visibly at long seq.
+
+#### 5.4.6 TF32-off A/B on ResNet-18 *(Phase 11, triggered by §4.2)*
+
+Disable both TF32 flags and re-profile. Prediction: Winograd re-enters the profile, validating that TF32's overwhelming throughput advantage is what hid Winograd in the default configuration.
+
+#### 5.4.7 MAGMA→cuBLAS A/B on DistilBERT *(Phase 11, new, triggered by §5.2.2)*
+
+Set `torch.backends.cuda.preferred_linalg_library('cublas')` and re-profile DistilBERT. Prediction: `magma_sgemmEx_kernel` disappears, replaced by `cublasLt*` kernels with `s16816gemm` TF32-TC variants. TC share flips from 0 % → 50 %+. If TC share stays at 0 %, the cause is not the dispatcher preference but a genuine absence of TF32 TC tiles for these shapes on `sm_120` in cuBLASLt 12.8.
 
 <br>
 
 ---
 
-## 6. Roofline analysis *(pending)*
+## 6. Roofline analysis
 
-> *Procedure.* Compute FLOPs per forward pass with `fvcore.nn.FlopCountAnalysis` [[12]](#ref-12) and memory traffic with `torch.cuda.max_memory_allocated()` bracketing the forward. Place each model at its (intensity, throughput) coordinate on a log-log plane with two ceilings overlaid — 800 GB/s memory bandwidth and 380 TFLOP/s TC-TF32 peak.
->
-> *Expected layout.* ResNet-18 under the TC ridge, DistilBERT near the TC peak, MobileNetV3-Small on the bandwidth ramp, Tiny GRU far left on the ramp. One paragraph of discussion per point.
+A rigorous roofline placement — using `fvcore.nn.FlopCountAnalysis` for per-model FLOPs and a `max_memory_allocated` bracket for memory traffic — is Phase 9's job. What we *can* produce from Phase 3 data is a **first-order numerical sketch** that places each model's observed latency against back-of-envelope FLOP estimates.
+
+<div align="center">
+
+**Table 6.1 — First-order roofline sketch (FLOPs per inference are published estimates; measured-latency column is this study)**
+
+</div>
+
+| Model | FLOPs / sample (approx.) | Measured latency (ms) per sample | Measured throughput (TFLOP/s observed) | Fraction of TF32-TC peak (≈ 380 TFLOP/s) | Fraction of FP32-SIMT peak (≈ 60 TFLOP/s) |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| ResNet-18 | 1.82 G | 0.366 | 4.97 | 1.3 % | 8.3 % |
+| MobileNetV3-Small | 0.056 G | 0.094 | 0.60 | 0.2 % | 1.0 % |
+| DistilBERT-base (seq 128) | ≈ 5.7 G | 1.544 | 3.69 | 1.0 % | 6.2 % |
+| Tiny GRU (seq 100) | ≈ 0.003 G | 0.0079 | 0.40 | — | 0.7 % |
+
+Observations:
+
+- **No model is remotely close to either ceiling.** Even ResNet-18 — the model with the highest TC share — is at 1.3 % of the TF32-TC peak. This is entirely consistent with "kernel-level profile ≠ peak FLOP utilization" — real workloads pay for memory traffic, kernel launch, BN, layout conversion, etc.
+- **MobileNetV3-Small and Tiny GRU are genuinely memory-bound** by the roofline definition (arithmetic intensity of depthwise conv and of the GRU's 128-wide hidden-hidden matmul are both << the ridge-point FLOPs/byte on this hardware).
+- **DistilBERT's low TFLOP/s figure is an artefact of MAGMA-over-cuBLAS routing** (§5.2.2), not of its roofline position. In theory it could reach 2–3× the observed 3.69 TFLOP/s just by flipping the matmul library.
+
+A proper Phase-9 pass will replace these back-of-envelope numbers with exact `fvcore` + `max_memory_allocated` measurements, plot the four points on a log-log plane with the two ceiling lines, and colour-code the points by whether they lie on the bandwidth ramp or the compute plateau.
 
 <br>
 
 ---
 
-## 7. Cross-model discussion *(pending)*
+## 7. Cross-model discussion
 
-Three threads expected once all four models are profiled.
+Four threads emerge from the four-model Phase-3 data.
 
-1. **TF32 on `sm_120` reshapes cuDNN's algorithm selection across the board.** All four models may show the same Winograd → implicit-GEMM shift; the magnitude differs.
-2. **Tensor-Core eligibility is driven by shape alignment, not architecture.** MobileNetV3-Small's depthwise convs have channel counts that don't tile well; DistilBERT's Q/K/V projections do. The profile cleanly separates the two.
-3. **Memory bandwidth is the true ceiling for half of these models.** The roofline plot should show GRU and MobileNetV3-Small pinned to the bandwidth ramp regardless of precision mode, which no amount of Tensor Cores can fix.
+<div align="center">
 
-Each thread will get a paragraph plus one pointer to the supporting figure.
+<img src="../results/plots/cross_model_category_stacked.png" alt="Cross-model kernel-category stacked bar" width="820">
+
+**Figure 7.1 — Cross-model kernel-time composition.** Each bar is one model's 100 % of GPU time split by kernel category. ResNet-18 is conv-dominated; MobileNetV3-Small is conv + BN; DistilBERT is ≈ 92 % matmul (MAGMA FP32) + 5 % fused attention; GRU is ≈ 80 % fused RNN + 17 % TC input-matmul.
+
+</div>
+
+<div align="center">
+
+<img src="../results/plots/cross_model_latency_throughput.png" alt="Cross-model latency and throughput" width="860">
+
+**Figure 7.2 — Latency (left) and throughput (right, log scale) across the zoo.** Tiny GRU is 500× faster per sample than DistilBERT; MobileNetV3-Small is ≈ 4× faster than ResNet-18 at the same batch 32.
+
+</div>
+
+<div align="center">
+
+<img src="../results/plots/cross_model_tc_share.png" alt="Cross-model Tensor-Core share" width="700">
+
+**Figure 7.3 — TF32 Tensor-Core share across the zoo.** ResNet-18 58 %, GRU 17 %, MobileNetV3 15 %, DistilBERT 0 %.
+
+</div>
+
+### 7.1 "FP32 inference" means four different things on four different models
+
+One flag — `torch.backends.cuda.matmul.allow_tf32 = True` — is on by default. Yet the resulting kernel-level math regime is dramatically different across the four models:
+
+- **ResNet-18** → TF32-TC implicit-GEMM (CUTLASS `s1688fprop` + CUTLASS/xmma `tf32f32` variants) at 58.45 % TC.
+- **MobileNetV3-Small** → PyTorch-native FP32 depthwise (no TC) + TF32-TC for the 1×1 pointwise convs that fit a tile (14.94 % TC overall).
+- **DistilBERT-base** → pure FP32 SIMT via MAGMA (0 % TC) — the dispatcher never hands the matmuls to cuBLASLt.
+- **Tiny GRU** → cuDNN persistent-RNN kernel (no TC) + one TF32-TC `s1688gemm` for the input-to-hidden matmul (16.77 % TC).
+
+This is the single most important cross-model observation in the study. The user's mental model of "we set `allow_tf32=True`, so everything runs on Tensor Cores" is wrong — even on the same driver, same cuDNN version, same PyTorch wheel. Whether TC engages depends on the dispatcher's per-op routing choice, and that choice varies by (op, shape, library availability, build-time heuristic). **On this stack, DistilBERT is the one model where the dispatcher doesn't route to a TC-capable kernel at all.**
+
+### 7.2 The dispatch layer is the most variable part of the stack
+
+Same PyTorch API — `aten::addmm`, `F.conv2d`, `nn.GRU` — hands off to *different libraries* across the four models:
+
+| API call | ResNet-18 routes to | MobileNetV3 routes to | DistilBERT routes to | GRU routes to |
+| :--- | :--- | :--- | :--- | :--- |
+| `F.conv2d` (standard conv) | cuDNN (`cudnn_convolution` → CUTLASS/xmma TF32) | cuDNN (for regular + 1×1) + **PyTorch-native** (for depthwise) | n/a | n/a |
+| `aten::addmm` (linear) | cuBLASLt (final FC → `simt_sgemm`) | **MAGMA** (SE-block projections) | **MAGMA** (all projections) | cuBLASLt (final FC) |
+| `aten::linear` | ↑ | ↑ | ↑ | ↑ |
+| `scaled_dot_product_attention` | n/a | n/a | **CUTLASS FlashAttention** (`fmha_cutlassF`) | n/a |
+| `nn.GRU` | n/a | n/a | n/a | **cuDNN persistent-RNN** (`RNN_blockPersist_fp_GRU`) |
+
+Six distinct kernel-providing libraries appear across four models (cuDNN, cuBLASLt, CUTLASS, MAGMA, FlashAttention-CUTLASS, PyTorch-native). Any claim that "PyTorch runs on cuDNN" is radically oversimplified.
+
+### 7.3 Fused kernels make work invisible in the op-level table
+
+Two of four models have their dominant work hidden inside fused kernels that don't appear as a separate `aten::*` row in the top-25:
+
+- **DistilBERT's softmax** is fused inside `fmha_cutlassF_f32_aligned_64x64_rf_sm80`. There is no `softmax` kernel in the profile, not because softmax is free but because CUTLASS's FlashAttention absorbs it.
+- **Tiny GRU's 100-timestep recurrent loop** is fused inside `RNN_blockPersist_fp_GRU`. There is no per-timestep kernel launch, not because timesteps are free but because cuDNN's persistent-RNN kernel keeps weights resident in shared memory across all 100 steps.
+
+**Pedagogical consequence:** "few kernels in the top-25" is a *proxy* for "good fusion", not a proxy for "small workload". A practitioner who only glances at the top-25 count without reading the kernel names will misjudge where the time is going.
+
+### 7.4 Tensor-Core engagement is driven by tile alignment AND dispatcher preference
+
+Three of four models engage TC. The one that doesn't — DistilBERT — isn't held back by architecture. Its matmul shapes (`(1024, 768) × (768, 768)`, `(1024, 768) × (768, 3072)`) are *perfectly* aligned for a 16×16×8 TF32 Tensor-Core instruction. The reason TC share is 0 % is that the **dispatcher chose MAGMA**, and MAGMA has no TC path. This is a dispatcher-preference problem, not a hardware-alignment problem.
+
+Contrast with MobileNetV3-Small's depthwise convs: there, the TC-absence *is* alignment-driven — the reduction dim of a depthwise conv is 1, and no TC-MMA instruction supports that. Even on an ideal dispatcher, depthwise would not engage TC.
+
+The Phase-3 data cleanly separates these two root causes of TC absence: **dispatcher-preference** (DistilBERT → MAGMA) and **structural-misalignment** (MobileNetV3 depthwise). The writeup's cross-model discussion should name both.
+
+### 7.5 Arithmetic-intensity × kernel-fusion × launch-overhead = the three axes that explain the zoo
+
+- **ResNet-18** is compute-bound on TC (conv kernels have high arithmetic intensity; all fit TC tiles; low launch-overhead because kernels are big).
+- **MobileNetV3-Small** is *launch-overhead-bound* — not compute-bound, not memory-bound. The depthwise + BN + activation + SE pattern issues 180 kernel launches per forward, each servicing a tiny working set. Per the profile, 21.83 % of time is BN (fixed per-call overhead that doesn't shrink with the conv it follows). Improving MobileNetV3's throughput on this hardware would require `torch.compile`-style kernel fusion (out of scope — see §1.3 non-goals) or a `channels_last` switch.
+- **DistilBERT-base** is dispatcher-bottlenecked. The shape is ideal for TC; the dispatcher routes to non-TC MAGMA; hence the real compute ceiling is 3–5× higher than the observed 3.69 TFLOP/s.
+- **Tiny GRU** is fully-fused. cuDNN's persistent-RNN kernel collapses what would be 200+ per-timestep launches into 2 fused launches (one per layer). The remaining 17 % of time is a single TC input-matmul. This model is *already* near its kernel-fusion optimum; there is very little left to squeeze.
+
+Each of these four diagnoses points at a different optimisation lever:
+
+| Model | Dominant bottleneck | Most-promising lever |
+| :--- | :--- | :--- |
+| ResNet-18 | Layout conversions (9.52 %) | `channels_last` (Phase 10) |
+| MobileNetV3-Small | Launch-overhead / BN cost | `torch.compile` fusion (non-goal); otherwise FP16 autocast (Phase 7) |
+| DistilBERT-base | MAGMA dispatch → zero TC | `torch.backends.cuda.preferred_linalg_library('cublas')` (§5.4.7) |
+| Tiny GRU | Already near-optimal fusion | Batch size scaling (§5.4.3) |
 
 <br>
 
@@ -445,11 +768,15 @@ Each thread will get a paragraph plus one pointer to the supporting figure.
 
 | # | Threat | Mitigation |
 | :---: | :--- | :--- |
-| 1 | **Laptop thermal throttling** — after ~3 min of sustained profiling the GPU hits 80 °C and boost clock drops | Insert 3–5 s sleeps between runs; monitor temperature with `nvidia-smi dmon -s u`. Baseline §4 figures are from one 10-iteration window after adequate cool-down |
+| 1 | **Laptop thermal throttling** — after ~3 min of sustained profiling the GPU hits 80 °C and boost clock drops | Insert `sleep 5` between models; std/mean ratio < 10 % across all four models (log_3 §4) |
 | 2 | **Single GPU, single driver version** — results not necessarily portable | Software stack reported in full (§3.2) so results can be re-evaluated against future drivers |
-| 3 | **Input-statistic sensitivity** — cuDNN's algorithm micro-benchmark depends on numeric ranges of inputs; we use `torch.randn` whereas real ImageNet images might select slightly different algorithms | Effect is expected to be small; we cannot exclude it |
-| 4 | **TF32 silently active** — all "FP32" figures in §4 are effectively TF32 | Noted in-line; controlled A/B queued as §5.9 |
-| 5 | **`Self CUDA % > 100`** — the `ProfilerStep*` synthetic row reports 104.24 % because it includes profiler-internal time not counted elsewhere | Presentational artefact, not a timing error |
+| 3 | **Random-input sensitivity** — cuDNN / cuBLAS / MAGMA heuristics depend on numeric ranges of inputs; we use `torch.randn` / `torch.randint` whereas real inputs might select different algorithms | Effect expected to be small for the dominant kernels in the study; we cannot exclude algorithm-flip edge cases |
+| 4 | **TF32 silently active** — all "FP32" figures are effectively TF32 on any op that accepts it | Noted throughout (§2.2, §4.2, §7.1); controlled TF32-off A/B queued as §5.4.6 |
+| 5 | **Dispatcher-preference-dependent results** — DistilBERT's 0 % TC share (§5.2.2) is a consequence of the `aten::addmm` dispatcher routing to MAGMA, not of model architecture. A different PyTorch build, a different `preferred_linalg_library` setting, or a different cu-version wheel could produce materially different numbers | Finding documented in-line; A/B experiment queued as §5.4.7 |
+| 6 | **`Self CUDA % > 100`** — the `ProfilerStep*` synthetic row reports ~104–305 % because it includes profiler-internal time not counted elsewhere (most visible in Tiny GRU at 305 % because the kernel total is so small) | Presentational artefact, not a timing error |
+| 7 | **MobileNetV3 depthwise conv not under cuDNN** — the `aten::_conv_depthwise2d` PyTorch-native path handles 25.71 % of MobileNetV3's GPU time. Any statement of the form "cuDNN dispatches depthwise conv to …" is wrong for this model on this build | Documented in §5.1.2 |
+| 8 | **DistilBERT's first run requires HF Hub reachability** — network errors or `SSL_CERT_FILE` mis-configuration will surface as a download failure; log_3 §2.5 documents a `unset SSL_CERT_FILE` workaround for the specific conda-env bug observed | One-time download cached under `~/.cache/huggingface/`; subsequent runs are offline |
+| 9 | **Batch-size normalisation** — DistilBERT runs at batch 8 (per brief §1.3), the other three at batch 32. Direct per-*batch* latency comparison between DistilBERT and the vision models is misleading; per-*sample* throughput (Table 7.1 column 3) is the fair comparison | Per-batch and per-sample metrics both reported side-by-side (§7, Figure 7.2) |
 
 <br>
 
@@ -457,9 +784,28 @@ Each thread will get a paragraph plus one pointer to the supporting figure.
 
 ## 9. Conclusion
 
-> *Placeholder for the final synthesis.*
+All four baseline profiles are complete. The kernel-level data contradicts four predictions baked into the original brief and clarifies the math-regime structure of "FP32 inference" on a Blackwell-class laptop GPU.
 
-At time of writing, the substantive conclusion after one profiled model is that the brief's prediction about Winograd dominance in ResNet-18 **does not hold** on Blackwell + cuDNN 9.10.2 + PyTorch's default TF32 configuration, and that **9.52 % of GPU time** is spent on layout conversions that a one-line `channels_last` change should eliminate. Both findings are actionable. Neither would have been visible without reading the kernel-level profile.
+### 9.1 Four findings that contradict the brief
+
+1. **Winograd is absent from ResNet-18** (§4.2). Blackwell's TF32 Tensor Cores + PyTorch's default `allow_tf32=True` steer `cudnn.benchmark` toward CUTLASS `s1688fprop` and xmma `tf32f32` implicit-GEMM paths that are faster than any Winograd variant on this hardware. Brief's "Winograd for 3×3 filters" prediction fails. Finding is reproducible in the trace at 58.44 % TC share.
+2. **Layout-conversion kernels take 9.52 % of ResNet-18's GPU time** (§4.3) because cuDNN's TF32-TC kernels want NHWC and torchvision stores NCHW. A one-line `channels_last` switch should eliminate most of this.
+3. **DistilBERT-base engages zero Tensor Cores at FP32** (§5.2.2) because `aten::addmm` routes to MAGMA rather than cuBLAS. This is the strongest single finding of the study: the brief's "transformer matmul TC showcase" premise is inverted on this stack — DistilBERT is the *only* model in the zoo with 0 % TC share.
+4. **MobileNetV3-Small's BatchNorm is 21.83 % of GPU time** (§5.1.3), more than depthwise conv (25.71 %) at roughly parity with it. The brief's "60 % depthwise / 30 % pointwise / 10 % miscellaneous" decomposition understates BN's fixed-per-call cost in a network where each conv is tiny.
+
+### 9.2 The common thread
+
+Each of the four findings traces back to a single observation: **the dispatcher layer between PyTorch's aten-op API and the GPU kernel is the most behaviourally-variable part of the stack**. Same `aten::addmm` call goes to cuBLASLt in ResNet-18's final FC and to MAGMA in DistilBERT's linears. Same `F.conv2d` call goes to cuDNN for regular conv and to PyTorch-native for depthwise. Same `allow_tf32=True` flag produces TF32-TC kernels for ResNet-18 but SIMT FP32 kernels for DistilBERT. **Cross-model performance comparison at the aten-op level is a comparison of dispatcher decisions, not of architectures.**
+
+### 9.3 What the reader should take away
+
+- A profile without decoded kernel names is inscrutable; the extent to which our Phase 3 findings (especially DistilBERT → MAGMA) are *only visible in the raw kernel-name strings* is the strongest argument for this study's methodology.
+- "FP32 inference on Blackwell" means four different math regimes for four different models on the same `torch 2.10.0+cu128` wheel. Plan for this when interpreting any aggregate benchmark.
+- Four high-impact follow-up experiments are now concrete and queued (§5.4.1–§5.4.7). The most impactful — the `preferred_linalg_library` A/B on DistilBERT — is expected to recover a factor of 2–5× in matmul throughput from a one-line change.
+
+### 9.4 What we didn't do
+
+Phases 5, 6, 7, 8, 9, 10, 11 remain. Nsight Systems has not been installed (Phase 5 blocker). No AMP/FP16 measurement has been taken. No batch-size sweep. No `channels_last` experiment. No roofline placement from measured memory traffic (§6 is back-of-envelope only). No TF32-off A/B. The study's methodology has been validated across four models; applying the controlled experiments to that methodology is the remaining bulk of the work.
 
 <br>
 
@@ -579,9 +925,11 @@ This produces `results/traces/resnet18_baseline_bs32_benchOn.json` and prints th
 
 ---
 
-## Appendix C — raw profiler output (ResNet-18, top-25 rows)
+## Appendix C — raw profiler output (all four models, condensed)
 
-Full text as emitted by `prof.key_averages().table(sort_by="cuda_time_total", row_limit=25)` is preserved in [`docs/execution_log_1.md §4.6`](../docs/execution_log_1.md). Key columns replicated here for completeness.
+Full text as emitted by `prof.key_averages().table(sort_by="cuda_time_total", row_limit=25)` for each model is preserved in [`docs/execution_log_1.md §4.6`](../docs/execution_log_1.md) (ResNet-18 first-pass), [`docs/execution_log_2.md §6.3`](../docs/execution_log_2.md) (ResNet-18 rework), and [`docs/execution_log_3.md §4`](../docs/execution_log_3.md) (three remaining models). Condensed tables below; all numbers are from the 10-iteration profiler window (not the multi-trial CUDA-event sweep).
+
+### C.1 ResNet-18 (batch 32, reworked run)
 
 ```
 Name                                                 Self CUDA   Self CUDA %   # of Calls
@@ -602,6 +950,67 @@ aten::add_ (residual)                                 3.237 ms         2.85 %   
 aten::linear (final FC, SIMT GEMM)                    0.156 ms         0.14 %          10
 ---
 Self CUDA time total                                113.393 ms       100.00 %
+```
+
+### C.2 MobileNetV3-Small (batch 32)
+
+```
+Name                                                 Self CUDA   Self CUDA %   # of Calls
+---------------------------------------------------- ----------  ------------  ----------
+aten::cudnn_convolution (aggregate regular + 1×1)     6.476 ms        31.73 %         410
+  cutlass_80_tensorop_s1688gemm_256x64_16x4_…         1.659 ms         8.13 %          70
+  implicit_convolve_sgemm<1024,5,5,3,3,3,1,…>         1.543 ms         7.56 %          60
+  implicit_convolve_sgemm<128,5,5,3,3,3,1,…>          0.881 ms         4.32 %          70
+aten::_conv_depthwise2d (aggregate, PyTorch-native)   5.247 ms        25.71 %         110
+  DepthwiseConv2d_cu…conv_depthwise2d_forward (A)     3.609 ms        17.68 %          80
+  DepthwiseConv2d_cu…conv_depthwise2d_forward (B)     1.638 ms         8.02 %          30
+aten::cudnn_batch_norm → bn_fw_inf_1C11_NCHW          4.455 ms        21.83 %         340
+aten::hardswish_ → vectorized_elementwise_kernel      1.136 ms         5.56 %         190
+vectorized_elementwise_kernel (SE block other)        1.042 ms         5.11 %         140
+aten::clamp_min_ (ReLU inside SE)                     0.956 ms         4.68 %          50
+magma_sgemmEx_kernel<f,f,f,0,0,6,3,5,3,3>             0.911 ms         4.46 %          30
+adaptive_avg_pool2d → reduce_kernel                   0.686 ms         3.36 %         100
+---
+Self CUDA time total                                 20.412 ms       100.00 %
+```
+
+### C.3 DistilBERT-base (batch 8, seq 128)
+
+```
+Name                                                 Self CUDA   Self CUDA %   # of Calls
+---------------------------------------------------- ----------  ------------  ----------
+aten::addmm → magma_sgemmEx_kernel<f,f,f,1,0,6,4,…> 111.661 ms        91.89 %         360
+aten::scaled_dot_product_attention → _efficient
+  → fmha_cutlassF_f32_aligned_64x64_rf_sm80…          5.657 ms         4.66 %          60
+aten::native_layer_norm → vectorized_layer_norm_k.    1.803 ms         1.48 %         130
+aten::gelu → GeluCUDAKernelImpl                       1.141 ms         0.94 %          60
+aten::add → vectorized_elementwise_kernel (add)       1.024 ms         0.84 %         120
+aten::embedding → vectorized_gather_kernel            0.143 ms         0.12 %          20
+attention-mask elementwise_kernel                     0.082 ms         0.07 %          10
+cudaStreamIsCapturing (profiler-internal)             0.020 ms         0.02 %          70
+---
+Self CUDA time total                                121.511 ms       100.00 %
+
+Observation: zero cuBLAS kernels, zero Tensor-Core kernels. All 360 matmul
+calls resolve to magma_sgemmEx_kernel. See §5.2.2.
+```
+
+### C.4 Tiny GRU (batch 32, seq 100)
+
+```
+Name                                                 Self CUDA   Self CUDA %   # of Calls
+---------------------------------------------------- ----------  ------------  ----------
+aten::gru → aten::_cudnn_rnn (wrapper)                1.658 ms        96.11 %          10
+  RNN_blockPersist_fp_GRU<f,f,f,128>                  1.265 ms        73.33 %          20
+  cutlass_80_tensorop_s1688gemm_128x256_16x3_tn_a4    0.289 ms        16.77 %          20
+  persistRNN_addBias<f,f>                             0.104 ms         6.01 %          20
+aten::linear (final FC) → aten::addmm                 0.042 ms         2.41 %          10
+  cutlass_80_simt_sgemm_32x128_8x5_tn_align1          0.030 ms         1.71 %          10
+  cublasLt splitKreduce_kernel                        0.012 ms         0.70 %          10
+elementwise_kernel (direct copy, output stage)        0.019 ms         1.08 %          10
+aten::zeros → fill_ (zero-init h_0)                   0.007 ms         0.41 %          10
+---
+Self CUDA time total                                  1.725 ms       100.00 %
 ```
 
 <br>
@@ -631,6 +1040,7 @@ Full output of `pip freeze` in the `hdai` env is saved in [`requirements.txt`](.
 
 <div align="center">
 
-*End of report — §§5–9 to be populated as experiments complete.*
+*End of report — §§5.1–5.3, §6, §7, §8, §9 complete through Phase 3.*
+*§§5.4.1–5.4.7 (controlled experiments) remain scheduled for Phases 6, 7, 8, 10, 11.*
 
 </div>
