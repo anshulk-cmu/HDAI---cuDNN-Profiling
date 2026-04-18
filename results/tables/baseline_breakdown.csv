@@ -1,0 +1,5 @@
+model,batch,latency_ms_mean,latency_ms_std,throughput_samples_per_sec,total_cuda_ms,events,events_per_iter,conv_winograd_pct,conv_implicit_gemm_pct,conv_depthwise_pct,conv_backward_pct,matmul_tensor_core_pct,matmul_fp32_pct,fused_attention_pct,norm_pct,layout_convert_pct,pool_pct,rnn_pct,softmax_pct,elementwise_pct,reduce_pct,embed_gather_pct,other_pct,tc_total_pct
+ResNet-18,32,11.71,0.609,2732.7,113.37,1140,114.0,0.0,69.89,0.0,0.0,0.0,0.14,0.0,8.52,9.52,3.13,0.0,0.0,8.66,0.15,0.0,0.0,58.45
+MobileNetV3-Small,32,3.006,0.18,10644.2,20.412,1800,180.0,0.0,11.88,25.71,0.0,14.94,6.14,0.0,21.83,0.0,0.0,0.0,0.0,15.52,3.99,0.0,0.0,14.94
+DistilBERT-base,8,12.355,0.436,647.5,121.511,760,76.0,0.0,0.0,0.0,0.0,0.0,91.89,4.66,1.48,0.0,0.0,0.0,0.0,1.85,0.0,0.12,0.0,0.0
+Tiny GRU,32,0.252,0.01,127003.4,1.725,100,10.0,0.0,0.0,0.0,0.0,16.77,1.71,0.0,0.0,0.0,0.0,79.34,0.0,1.48,0.7,0.0,0.0,16.77

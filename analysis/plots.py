@@ -65,10 +65,12 @@ MODEL_ID = {
 # Category colours kept consistent across all plots. Order matters for stacking.
 CATEGORY_COLOURS = {
     'conv_implicit_gemm':  '#d8553b',
+    'conv_depthwise':      '#a63720',
     'conv_winograd':       '#e6a23c',
     'conv_backward':       '#f5c871',
     'matmul_tensor_core':  '#b24df0',
     'matmul_fp32':         '#3b7dd8',
+    'fused_attention':     '#7a3fc4',
     'norm':                '#2ba87b',
     'layout_convert':      '#888888',
     'pool':                '#6fa3ef',
@@ -76,6 +78,7 @@ CATEGORY_COLOURS = {
     'softmax':             '#c4b94a',
     'elementwise':         '#9aa8ba',
     'reduce':              '#6c7580',
+    'embed_gather':        '#a0a0a0',
     'other':               '#d0d0d0',
 }
 

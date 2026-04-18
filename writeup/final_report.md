@@ -19,13 +19,13 @@
 
 <br>
 
-*Target length: 10–14 pages* · *Status: in progress (all four baselines complete through Phase 3 — see `docs/execution_log_2.md` and `docs/execution_log_3.md`)*
+*Target length: 10–14 pages* · *Status: in progress (baselines + kernel-classification centerpiece complete through Phase 4 — see `docs/execution_log_2.md`, `docs/execution_log_3.md`, and `docs/execution_log_4.md`)*
 
 ---
 
 </div>
 
-> **Document status.** Sections covering **all four models** (§4 ResNet-18, §5.1 MobileNetV3-Small, §5.2 DistilBERT-base, §5.3 Tiny GRU) are backed by real measurements. Four chrome traces are on disk under `results/traces/`, eight analysis figures under `results/plots/`. Multi-trial CUDA-event timing used 7 trials × 50 iterations per model after 30 warmups. See [`docs/execution_log_2.md`](../docs/execution_log_2.md) for the Phase-2 (ResNet-18) audit and [`docs/execution_log_3.md`](../docs/execution_log_3.md) for the Phase-3 (three additional models) audit. Sections §5.4 onwards (the controlled experiments — benchmark-toggle, AMP, batch-sweep, channels-last, seq-sweep, TF32-off A/B) remain protocol-only placeholders scheduled for later phases.
+> **Document status.** Sections covering **all four models** (§4 ResNet-18, §5.1 MobileNetV3-Small, §5.2 DistilBERT-base, §5.3 Tiny GRU) are backed by real measurements, and **§5.5 Cross-model summary** is backed by the Phase-4 classifier pass ([`results/tables/baseline_breakdown.csv`](../results/tables/baseline_breakdown.csv)). Four chrome traces are on disk under `results/traces/`, eight analysis figures under `results/plots/`. Multi-trial CUDA-event timing used 7 trials × 50 iterations per model after 30 warmups. See [`docs/execution_log_2.md`](../docs/execution_log_2.md) for the Phase-2 (ResNet-18) audit, [`docs/execution_log_3.md`](../docs/execution_log_3.md) for the Phase-3 (three additional models) audit, and [`docs/execution_log_4.md`](../docs/execution_log_4.md) for the Phase-4 classifier audit. Sections §5.4 onwards (the controlled experiments — benchmark-toggle, AMP, batch-sweep, channels-last, seq-sweep, TF32-off A/B) remain protocol-only placeholders scheduled for later phases.
 
 <br>
 
@@ -57,6 +57,7 @@
   - [5.2 DistilBERT-base](#52-distilbert-base-completed)
   - [5.3 Tiny GRU](#53-tiny-gru-completed)
   - [5.4 Pending experiments (benchmark-toggle, AMP, batch sweep, channels-last, seq sweep, TF32-off)](#54-pending-experiments)
+  - [5.5 Cross-model summary table *(Phase 4 centerpiece)*](#55-cross-model-summary-table-phase-4-centerpiece)
 - [6. Roofline analysis](#6-roofline-analysis)
 - [7. Cross-model discussion](#7-cross-model-discussion)
 - [8. Threats to validity](#8-threats-to-validity)
@@ -271,6 +272,8 @@ Every number placed in a table is reported to a precision no finer than the meas
 
 Total CPU time across the 10 iterations is **118.818 ms**, closely tracking GPU time — this workload is **not** CPU-launch-overhead bound at batch 32.
 
+> **A note on aggregation.** PyTorch Profiler's `aten::cudnn_convolution` aggregate (79.42 %) includes ~9.52 pp of time spent in `nchwToNhwcKernel` / `nhwcToNchwKernel` layout-conversion kernels, which cuDNN dispatches from *inside* the convolution call. The kernel-name-based classifier used in Table 5.5 and Figure 4.1 separates these into their own `layout_convert` bucket, so the pure `conv_implicit_gemm` category there reads as **69.89 %**. Both decompositions describe the same trace; one is aten-op-grouped, the other is kernel-class-grouped. The 9.52 % layout-conversion share is the same number either way and motivates §4.3.
+
 <div align="center">
 
 <img src="../results/plots/resnet18_kernel_breakdown.png" alt="ResNet-18 kernel-time breakdown by coarse category" width="720">
@@ -426,7 +429,7 @@ The `aten::_conv_depthwise2d` aggregate (5.247 ms) covers two PyTorch-native dep
 - `DepthwiseConv2d_cu...conv_depthwise2d_forward` variant A — 80 calls, 3.609 ms (17.68 %).
 - `DepthwiseConv2d_cu...conv_depthwise2d_forward` variant B — 30 calls, 1.638 ms (8.02 %).
 
-Neither is a cuDNN kernel. PyTorch has hand-written depthwise code paths for stride/kernel combinations where cuDNN's depthwise tile shapes don't win. 110 calls ÷ 10 iters = **11 depthwise layers per forward**, which matches torchvision's MobileNetV3-Small source (≈ one depthwise per InvertedResidual block).
+Neither is a cuDNN kernel. PyTorch has hand-written depthwise code paths for stride/kernel combinations where cuDNN's depthwise tile shapes don't win. 110 calls ÷ 10 iters = **11 depthwise layers per forward**, which matches torchvision's MobileNetV3-Small source (≈ one depthwise per InvertedResidual block). These kernels are classified under the dedicated `conv_depthwise` bucket in Table 5.5 (added in Phase 4) — keyword-matching the mangled `DepthwiseConv2d_cu_..._conv_depthwise2d_forward_kernel` symbol.
 
 #### 5.1.3 Finding — BatchNorm is disproportionately large
 
@@ -536,7 +539,7 @@ Decoding the kernel name:
 
 PyTorch 2.x's `torch.nn.functional.scaled_dot_product_attention` automatically dispatches to this kernel when its preconditions are met. It fuses `Q @ K^T`, `softmax(QK^T / √d)`, and `(softmax(…)) @ V` into a single kernel launch — the intermediate N×N attention matrix never materialises in global memory. Softmax never appears as a separate row in the profile because it's an inlined dataflow step inside this kernel. The brief's prediction "softmax a small slice" holds in the stronger form: **softmax is invisible because it's fused**.
 
-At FP32 the FMHA kernel doesn't engage TC either (the `f32_aligned` naming flag signals pure FP32). An FP16 autocast (§5.4.2, pending) should route to `fmha_cutlassF_f16` which will include HMMA instructions.
+At FP32 the FMHA kernel doesn't engage TC either (the `f32_aligned` naming flag signals pure FP32). An FP16 autocast (§5.4.2, pending) should route to `fmha_cutlassF_f16` which will include HMMA instructions. This kernel is classified under the dedicated `fused_attention` bucket in Table 5.5 (added in Phase 4) — keyword-matching `fmha` / `AttentionKernel` to separate fused attention from both `matmul_*` and `other`.
 
 #### 5.2.4 Op-count sanity
 
@@ -643,6 +646,29 @@ Set `torch.backends.cuda.preferred_linalg_library('cublas')` and re-profile Dist
 
 <br>
 
+### 5.5 Cross-model summary table *(Phase 4 centerpiece)*
+
+Every kernel event in all four traces has been run through the classifier in [`analysis/classify_kernels.py`](../analysis/classify_kernels.py) and aggregated by [`analysis/compute_summary.py`](../analysis/compute_summary.py). The resulting CSV ([`results/tables/baseline_breakdown.csv`](../results/tables/baseline_breakdown.csv)) carries one row per model × 17 category columns + latency / throughput / TC-share columns. A compact rendering:
+
+<div align="center">
+
+**Table 5.5 — Cross-model baseline kernel-time breakdown.** The `Other%` column here bundles `layout_convert`, `pool`, `rnn`, `softmax`, `reduce`, `embed_gather`, and `other` for presentation; the full-precision per-category breakdown is in the CSV. `Matmul%` includes `matmul_tensor_core + matmul_fp32 + fused_attention` (attention is fused matmul).
+
+</div>
+
+| Model | Batch | Lat (ms) | Thru (samp/s) | Conv % | Matmul % | Norm % | Elem % | Other % | TC % |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| ResNet-18 | 32 | 11.71 ± 0.61 | 2,733 | 69.9 | 0.1 | 8.5 | 8.7 | 12.8 | 58.5 |
+| MobileNetV3-Small | 32 | 3.01 ± 0.18 | 10,644 | 37.6 | 21.1 | 21.8 | 15.5 | 4.0 | 14.9 |
+| DistilBERT-base | 8 | 12.36 ± 0.44 | 648 | 0.0 | 96.5 | 1.5 | 1.9 | 0.1 | 0.0 |
+| Tiny GRU | 32 | 0.25 ± 0.01 | 127,003 | 0.0 | 18.5 | 0.0 | 1.5 | 80.0 | 16.8 |
+
+**How to read.** `Conv` for MobileNetV3 is `conv_implicit_gemm + conv_depthwise = 11.9 + 25.7 = 37.6` — the classifier splits regular (cuDNN-dispatched) from depthwise (PyTorch-native) so the 25.7 % depthwise finding is not hidden in a generic "other" bucket as it was in earlier drafts. `Matmul` for DistilBERT is `matmul_fp32 + fused_attention = 91.9 + 4.66 ≈ 96.5` — the FlashAttention kernel is classified under `fused_attention` (added in Phase 4) rather than dumped into `other`. `Other` for Tiny GRU is `rnn = 79.3 %` (the fused persistent-RNN kernel lives in its own bucket, not rolled into matmul).
+
+**Every row sums to 100.00 % ± 0.01.** The `other_pct` column in the CSV itself is 0.00 for all four models — every kernel above 0.1 % of any trace has a named category after the Phase-4 classifier fixes.
+
+<br>
+
 ---
 
 ## 6. Roofline analysis
@@ -660,7 +686,7 @@ A rigorous roofline placement — using `fvcore.nn.FlopCountAnalysis` for per-mo
 | ResNet-18 | 1.82 G | 0.366 | 4.97 | 1.3 % | 8.3 % |
 | MobileNetV3-Small | 0.056 G | 0.094 | 0.60 | 0.2 % | 1.0 % |
 | DistilBERT-base (seq 128) | ≈ 5.7 G | 1.544 | 3.69 | 1.0 % | 6.2 % |
-| Tiny GRU (seq 100) | ≈ 0.003 G | 0.0079 | 0.40 | — | 0.7 % |
+| Tiny GRU (seq 100) | ≈ 0.003 G | 0.0079 | 0.40 | 0.02 % | 0.7 % |
 
 Observations:
 
@@ -974,6 +1000,8 @@ adaptive_avg_pool2d → reduce_kernel                   0.686 ms         3.36 % 
 Self CUDA time total                                 20.412 ms       100.00 %
 ```
 
+> **Classifier note (Phase 4).** The two `DepthwiseConv2d_cu…conv_depthwise2d_forward` rows (aggregate 25.71 %) are classified under the `conv_depthwise` bucket in Table 5.5 — previously they were silently lumped into `other`.
+
 ### C.3 DistilBERT-base (batch 8, seq 128)
 
 ```
@@ -994,6 +1022,8 @@ Self CUDA time total                                121.511 ms       100.00 %
 Observation: zero cuBLAS kernels, zero Tensor-Core kernels. All 360 matmul
 calls resolve to magma_sgemmEx_kernel. See §5.2.2.
 ```
+
+> **Classifier note (Phase 4).** The `fmha_cutlassF_f32_aligned_64x64_rf_sm80…AttentionKernel` row (4.66 %) is classified under `fused_attention` in Table 5.5 — previously in `other`. The `vectorized_gather_kernel` (0.12 %, embedding lookup) is classified under `embed_gather`. Both are below the `matmul_*` rule in keyword-precedence so their distinctive tokens match first.
 
 ### C.4 Tiny GRU (batch 32, seq 100)
 
@@ -1040,7 +1070,7 @@ Full output of `pip freeze` in the `hdai` env is saved in [`requirements.txt`](.
 
 <div align="center">
 
-*End of report — §§5.1–5.3, §6, §7, §8, §9 complete through Phase 3.*
+*End of report — §§5.1–5.5, §6, §7, §8, §9 complete through Phase 4.*
 *§§5.4.1–5.4.7 (controlled experiments) remain scheduled for Phases 6, 7, 8, 10, 11.*
 
 </div>

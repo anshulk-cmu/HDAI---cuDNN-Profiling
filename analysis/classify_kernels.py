@@ -14,6 +14,8 @@ def classify(name):
     # --- convolution sub-families, tested most-specific first ---
     if 'winograd' in n:
         return 'conv_winograd'
+    if 'depthwise' in n or 'conv_depthwise' in n:
+        return 'conv_depthwise'
     if 'implicit_gemm' in n or 'implicit_precomp' in n:
         return 'conv_implicit_gemm'
     if 'implicit_convolve' in n:
@@ -22,6 +24,12 @@ def classify(name):
         return 'conv_implicit_gemm'
     if 'dgrad' in n or 'wgrad' in n:
         return 'conv_backward'
+
+    # --- fused attention (FlashAttention / PyTorch Efficient Attention) ---
+    # Must run before matmul_tensor_core: a future FMHA variant carrying a
+    # 'tensorop'/'s1688' tile tag would otherwise land in matmul_tensor_core.
+    if 'fmha' in n or 'attentionkernel' in n or 'flashattn' in n:
+        return 'fused_attention'
 
     # --- matmul (cuBLAS / CUTLASS GEMM not inside a conv kernel name) ---
     if 'hmma' in n or 'tensorop_s16816gemm' in n or 'tensorop_s1688gemm' in n:
@@ -37,13 +45,15 @@ def classify(name):
     if 'nchwtonhwc' in n or 'nhwctonchw' in n:
         return 'layout_convert'
 
-    # --- pooling / rnn / softmax / elementwise / reduce ---
+    # --- pooling / rnn / softmax / elementwise / reduce / embedding ---
     if 'pool' in n:
         return 'pool'
     if 'rnn' in n or 'lstm' in n or 'gru' in n:
         return 'rnn'
     if 'softmax' in n:
         return 'softmax'
+    if 'gather' in n:
+        return 'embed_gather'
     if 'elementwise' in n or 'vectorized_elementwise' in n:
         return 'elementwise'
     if 'reduce' in n:
@@ -55,9 +65,11 @@ def classify(name):
 CATEGORY_ORDER = [
     'conv_winograd',
     'conv_implicit_gemm',
+    'conv_depthwise',
     'conv_backward',
     'matmul_tensor_core',
     'matmul_fp32',
+    'fused_attention',
     'norm',
     'layout_convert',
     'pool',
@@ -65,6 +77,7 @@ CATEGORY_ORDER = [
     'softmax',
     'elementwise',
     'reduce',
+    'embed_gather',
     'other',
 ]
 

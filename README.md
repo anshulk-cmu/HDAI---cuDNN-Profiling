@@ -33,7 +33,7 @@ The deliverable is a profiling report + plots + this small repo of scripts.
 | Phase 2 — ResNet-18 baseline profile (first pass) | Superseded | [`docs/execution_log_1.md`](docs/execution_log_1.md) |
 | Phase 2 rework — bug fixes, multi-trial rerun, analysis plots | Complete | [`docs/execution_log_2.md`](docs/execution_log_2.md), `results/traces/resnet18_baseline_bs32_benchOn.json` |
 | Phase 3 — baseline port to MobileNetV3, DistilBERT, GRU + cross-model plots | Complete | [`docs/execution_log_3.md`](docs/execution_log_3.md), 3 new traces, 8 plots under [`results/plots/`](results/plots/) |
-| Phase 4 — kernel classification, 4-model summary table | Pending | — |
+| Phase 4 — kernel classification, 4-model summary table | Complete | [`docs/execution_log_4.md`](docs/execution_log_4.md), [`results/tables/baseline_breakdown.csv`](results/tables/baseline_breakdown.csv), classifier buckets `conv_depthwise` + `fused_attention` + `embed_gather` added |
 | Phase 5 — Nsight Systems timeline | Blocked (Nsight install) | — |
 | Phases 6–12 (experiments, roofline, writeup) | Pending | — |
 
@@ -49,6 +49,8 @@ The deliverable is a profiling report + plots + this small repo of scripts.
 | Tiny GRU | 32 |  0.25 ± 0.01 | 127 003 | 16.77 % |
 
 Plots: [`cross_model_category_stacked.png`](results/plots/cross_model_category_stacked.png), [`cross_model_latency_throughput.png`](results/plots/cross_model_latency_throughput.png), [`cross_model_tc_share.png`](results/plots/cross_model_tc_share.png).
+
+Full classified per-category breakdown (17 category columns × 4 models) in [`results/tables/baseline_breakdown.csv`](results/tables/baseline_breakdown.csv) (Phase 4 centerpiece).
 
 ### ResNet-18 findings (from the reworked run)
 
@@ -207,11 +209,13 @@ HDAI_Project/
 ├── analysis/
 │   ├── __init__.py
 │   ├── parse_trace.py          # chrome-trace JSON -> per-kernel (time, #calls)
-│   ├── classify_kernels.py     # kernel-name -> coarse category
-│   └── plots.py                # per-model breakdowns + cross-model comparison plots
+│   ├── classify_kernels.py     # kernel-name -> coarse category (16 buckets after Phase 4)
+│   ├── plots.py                # per-model breakdowns + cross-model comparison plots
+│   └── compute_summary.py      # Phase-4 CSV emitter (baseline_breakdown.csv)
 ├── results/
 │   ├── traces/                 # chrome-trace JSONs (committed)
-│   └── plots/                  # analysis PNGs (committed)
+│   ├── plots/                  # analysis PNGs (committed)
+│   └── tables/                 # CSV summaries — baseline_breakdown.csv (Phase 4)
 └── writeup/
     └── final_report.md         # the main writeup, sections scaffolded
 ```
@@ -250,12 +254,15 @@ python -m analysis.parse_trace results/traces/resnet18_baseline_bs32_benchOn.jso
 # Analysis: render all 8 plots (4 per-model breakdowns + 3 cross-model + ResNet conv-algo)
 python -m analysis.plots
 
+# Analysis: emit the Phase-4 cross-model summary CSV
+python -m analysis.compute_summary
+
 # Nsight capture (Phase 5, blocked on a separate install)
 # nsys profile -t cuda,cudnn,cublas,nvtx -o results/nsys/resnet18 ^
 #     python -m profiling.run_baseline --model resnet18
 ```
 
-Phase 4 onwards (kernel classification summary CSV, Phase-6 benchmark-toggle experiment, Phase-7 AMP, Phase-8 batch sweep, Nsight captures) will add more CLI entry points under `profiling/` and `analysis/`.
+Phase 4's kernel-classification summary CSV ([`results/tables/baseline_breakdown.csv`](results/tables/baseline_breakdown.csv)) is now produced by [`analysis/compute_summary.py`](analysis/compute_summary.py). Phases 5+ (Nsight timeline, benchmark-toggle, AMP, batch-sweep, roofline) will add more CLI entry points under `profiling/` and `analysis/`.
 
 ---
 
