@@ -37,7 +37,9 @@ The deliverable is a profiling report + plots + this small repo of scripts.
 | Phase 5 — Nsight Systems timeline + NVTX instrumentation | Complete | [`docs/execution_log_5.md`](docs/execution_log_5.md), 4 `.nsys-rep` under [`results/nsys/`](results/nsys/), 8 screenshots `nsight_*` under [`results/plots/`](results/plots/), [`analysis/cross_check_nsight.py`](analysis/cross_check_nsight.py), writeup §5.6 |
 | Phases 6–12 (experiments, roofline, writeup) | Pending | — |
 
-### Headline findings so far (four-model baseline — see `docs/execution_log_2.md` for ResNet-18, `docs/execution_log_3.md` for the other three)
+### Headline findings so far — Phases 1–5
+
+Per-model details live in [`docs/execution_log_2.md`](docs/execution_log_2.md) (ResNet-18 rework), [`docs/execution_log_3.md`](docs/execution_log_3.md) (MobileNetV3 / DistilBERT / GRU), [`docs/execution_log_4.md`](docs/execution_log_4.md) (classifier + cross-model CSV), and [`docs/execution_log_5.md`](docs/execution_log_5.md) (Nsight timeline findings).
 
 **Cross-model table (batch per `DEFAULT_BATCH`, FP32+TF32, `cudnn.benchmark=True`):**
 
@@ -56,12 +58,12 @@ Full classified per-category breakdown (17 category columns × 4 models) in [`re
 
 - **Inference latency:** **11.71 ± 0.61 ms** / batch of 32 → **≈ 2 733 images/sec** on the RTX 5070 Ti Laptop GPU, measured as the mean over **7 trials × 50 iterations** of CUDA-event timing after 30 warm-ups. (The first-pass single-window number was 9.79 ms on a cold chip; the new number captures steady-state thermal behaviour and is the headline going forward.)
 - **Conv dominates, as expected:** `aten::cudnn_convolution` accounts for **79.42 %** of CUDA time; BatchNorm 8.52 %, ReLU 5.80 %, MaxPool 3.13 %, residual `add_` 2.85 %, FC 0.14 %.
-- **Winograd is absent; TF32 Tensor-Core implicit-GEMM wins.** The brief predicted Winograd would dominate ResNet-18 3×3 convs. On Blackwell + cuDNN 9.10.2, zero `winograd` kernels appear in the trace. Instead, cuDNN's benchmark search picks:
+- **Winograd is absent *in steady state*; TF32 Tensor-Core implicit-GEMM wins.** The brief predicted Winograd would dominate ResNet-18 3×3 convs. On Blackwell + cuDNN 9.10.2, **zero `winograd` kernels appear in the full-warmup (30-iter) baseline trace**. Phase 5's short-warmup (10-iter) Nsight capture shows `cudnn::winograd_nonfused::winogradForwardFilter4x4` at 3.0 % — cuDNN does probe Winograd during algorithm search, it just doesn't pick it at convergence. Once warmed up, the benchmark search picks:
   - `cutlass_tensorop_s1688fprop_optimized_tf32_64x64_16x10_nhwc_align4` — 28.4 %, 80 calls
   - `sm80_xmma_fprop_implicit_gemm_tf32f32_…_nhwckrsc_nchw` — 18.3 %, 60 calls
   - `sm80_xmma_fprop_implicit_gemm_tf32f32_…_nhwckrsc_nhwc` — 11.8 %, 30 calls
   - Two `implicit_convolve_sgemm` SIMT FP32 variants for shapes that don't fit TC tiles — 11.4 %
-  - **58.4 % of total CUDA time goes through Tensor Cores in TF32 math mode** even though we did not enable AMP. PyTorch's default `torch.backends.cuda.matmul.allow_tf32 = True` silently routes ResNet-18 through TF32 on Ampere+.
+  - **58.45 % of total CUDA time goes through Tensor Cores in TF32 math mode** even though we did not enable AMP. The TC routing comes from the cuDNN convolution path — `torch.backends.cudnn.allow_tf32` defaults to `True` on PyTorch 2.10.0+cu128, so cuDNN is free to dispatch TF32 Tensor-Core implicit-GEMM kernels. (Note: Phase 5's `[flags]` snapshot shows `torch.backends.cuda.matmul.allow_tf32 = False` on this wheel — TF32 engagement here is via cuDNN, not via plain `aten::matmul`.)
 - **Layout conversions are a real cost:** `nchwToNhwcKernel` (340 invocations) + `nhwcToNchwKernel` (110 invocations) = **9.52 %** of all CUDA time spent just reformatting tensors so the NHWC-preferring TC kernels can run on an NCHW model. This strongly motivates bringing the **`channels_last` experiment (brief §8.5)** forward in priority.
 - **Two project-wide issues surfaced in Phase 2 and fixed in the log_2 rework:**
   1. `profile/` as a directory name shadows Python's stdlib `profile` module via `torch._dynamo`'s `cProfile` import chain. Renamed to `profiling/`.
@@ -122,8 +124,9 @@ For each experiment we record timing mean ± std over ≥ 5 trials with GPU-even
 
 - **GPU:** NVIDIA GeForce RTX 5070 Ti Laptop GPU (Blackwell, compute capability `sm_120`, 12 GB GDDR7)
 - **Driver:** 592.01 (reports CUDA 13.1 runtime-compatible; cu128 wheel works fine)
-- **CUDA Toolkit:** 12.8 (for `nsys` / optional `nvcc`; PyTorch bundles its own 12.8 runtime)
+- **CUDA Toolkit:** not installed separately — the cu128 PyTorch wheel bundles the full CUDA 12.8 runtime, which is all we need for the profiling scripts. A system-wide CUDA Toolkit is unnecessary for this project.
 - **cuDNN:** 9.10.2 (`torch.backends.cudnn.version() == 91002`, bundled inside the PyTorch CUDA-12.8 wheel)
+- **Nsight Systems:** 2026.2.1 (installed at `C:\Program Files\NVIDIA Corporation\Nsight Systems 2026.2.1\`; `nsys.exe` CLI in `target-windows-x64/`, `nsys-ui.exe` GUI in `host-windows-x64/`). Provides `nsys` independently of any CUDA Toolkit install.
 - **OS:** Windows 11 Home 10.0.26200
 
 > A non-cu128 PyTorch wheel fails silently on Blackwell with *"no kernel image available for execution on the device."* Always use `--index-url https://download.pytorch.org/whl/cu128`.
@@ -152,7 +155,7 @@ Profiling & modelling:
 | tokenizers | 0.22.2 | DistilBERT tokenizer |
 | huggingface-hub | 1.11.0 | model download |
 | safetensors | 0.7.0 | model weight format |
-| nvtx | 0.2.15 | custom NVTX range annotations |
+| nvtx | 0.2.15 | NVTX range annotations in [`profiling/run_baseline.py`](profiling/run_baseline.py) (active from Phase 5) |
 | fvcore | 0.1.5.post20221221 | FLOP counting for roofline |
 | ptflops | 0.7.5 | alt FLOP/MAC counter |
 
@@ -189,7 +192,7 @@ python env/check_env.py
 
 Expected output includes `Device: NVIDIA GeForce RTX 5070 Ti Laptop GPU`, `Compute capability: sm_120`, cuDNN `91002`, and a passing cuDNN conv smoke test.
 
-**Nsight Systems** (2025.x) is required for the timeline inspection step (brief Phase 5) — install separately from NVIDIA's developer site and add to `PATH`. It is not yet installed in this environment.
+**Nsight Systems** is required for Phase 5's timeline inspection. This machine has **2026.2.1** installed under `C:\Program Files\NVIDIA Corporation\Nsight Systems 2026.2.1\`. The CLI (`nsys.exe`) is at `target-windows-x64/`, the GUI (`nsys-ui.exe`) is at `host-windows-x64/`. [`profiling/run_nsight.sh`](profiling/run_nsight.sh) auto-detects `nsys` on PATH and falls back to this absolute path, so no PATH edit is strictly required. Sanity check: `"/c/Program Files/NVIDIA Corporation/Nsight Systems 2026.2.1/target-windows-x64/nsys.exe" --version` should print `2026.2.1.210-...`.
 
 ---
 
@@ -204,7 +207,10 @@ HDAI_Project/
 │   ├── brief.md                # full project plan (phase-by-phase, appendices)
 │   ├── execution_log_0.md      # bootstrap log: env setup, version choices
 │   ├── execution_log_1.md      # Phase 2 log: first ResNet-18 profile (superseded)
-│   └── execution_log_2.md      # Phase-2 rework: bug fixes, multi-trial rerun, plots
+│   ├── execution_log_2.md      # Phase-2 rework: bug fixes, multi-trial rerun, plots
+│   ├── execution_log_3.md      # Phase 3: MobileNetV3 + DistilBERT + GRU baselines
+│   ├── execution_log_4.md      # Phase 4: kernel classifier + cross-model summary CSV
+│   └── execution_log_5.md      # Phase 5: Nsight Systems timeline + NVTX + cross-check
 ├── env/
 │   ├── check_env.py            # verify GPU, cuDNN, PyTorch versions
 │   └── sanity_conv.py          # 10-line conv to confirm cuDNN dispatch
@@ -216,7 +222,8 @@ HDAI_Project/
 │   └── gru.py                  # TinyGRU 2-layer loader (Phase 3)
 ├── profiling/                  # NOTE: renamed from `profile/` to avoid stdlib collision
 │   ├── __init__.py
-│   └── run_baseline.py         # multi-trial CUDA-event timing + profiler trace; MODEL_LOADERS dispatch
+│   ├── run_baseline.py         # multi-trial CUDA-event timing + profiler trace; NVTX-instrumented in Phase 5
+│   └── run_nsight.sh           # Phase-5 Nsight capture driver (all four models, auto-detects nsys)
 ├── analysis/
 │   ├── __init__.py
 │   ├── parse_trace.py          # chrome-trace JSON -> per-kernel (time, #calls)
@@ -224,20 +231,17 @@ HDAI_Project/
 │   ├── plots.py                # per-model breakdowns + cross-model comparison plots
 │   ├── compute_summary.py      # Phase-4 CSV emitter (baseline_breakdown.csv)
 │   └── cross_check_nsight.py   # Phase-5 regression: PyTorch Profiler vs Nsight agreement
-├── profiling/
-│   ├── run_baseline.py         # NVTX-instrumented (Phase 5) multi-trial baseline driver
-│   └── run_nsight.sh           # Phase-5 Nsight capture driver (all four models)
 ├── results/
 │   ├── traces/                 # chrome-trace JSONs (committed, Phase 3)
-│   ├── nsys/                   # Phase-5 Nsight .nsys-rep binary reports (committed)
+│   ├── nsys/                   # Phase-5 Nsight .nsys-rep binary reports + run logs
 │   │   └── stats/              # Phase-5 nsys stats CSVs (kern_sum + api_sum per model)
-│   ├── plots/                  # analysis PNGs + nsight_* screenshots (committed)
+│   ├── plots/                  # 8 analysis PNGs (Phase 3/4) + 8 nsight_*.png screenshots (Phase 5)
 │   └── tables/                 # CSV summaries — baseline_breakdown.csv (Phase 4)
 └── writeup/
-    └── final_report.md         # the main writeup, §§1-5.6 populated
+    └── final_report.md         # main writeup, §§1–5.6 populated (Phases 1–5 complete)
 ```
 
-Traces and plots under `results/` are **committed** so the repo reproduces the paper's numbers without needing to rerun the profiler. Phase-3 onward additions (more models, experiment drivers, Nsight reports, roofline CSVs, an overnight runner) will add folders as they are actually needed — we don't pre-scaffold empty directories.
+All chrome-traces, Nsight reports, stats CSVs, and PNGs under `results/` are **committed** so the repo reproduces the report's numbers without needing to rerun the profiler. Nsight's regenerable SQLite side-files (`results/nsys/*.sqlite`) are the only `results/` artefacts that are gitignored. Phase-6+ additions (benchmark-toggle CSV, AMP traces, batch-sweep plots, roofline CSV) will add folders as they are actually needed — we don't pre-scaffold empty directories.
 
 ---
 
@@ -287,16 +291,31 @@ Phase 4's kernel-classification summary CSV ([`results/tables/baseline_breakdown
 
 ## Deliverables
 
-1. **`writeup/final_report.md`** — 8–12 page profiling report with per-model sections and cross-model observations.
-2. **Six final figures** in `results/plots/`:
-   - `fig1_time_breakdown.png` — stacked bar, 4 models × 5 kernel categories
-   - `fig2_fp16_speedup.png` — grouped bar of FP32→FP16 speedup per model
-   - `fig3_batch_scaling.png` — throughput vs. batch size
-   - `fig4_algorithm_distribution.png` — which cuDNN algorithms are picked
-   - `fig5_roofline.png` — four models on a log-log roofline plane
-   - `fig6_nsight_timeline.png` — Nsight Systems screenshot
-3. **CSV tables** in `results/tables/` for every experiment.
-4. **Chrome traces & Nsight reports** for spot-checking individual runs.
+1. **`writeup/final_report.md`** — 8–12 page profiling report with per-model sections, cross-model observations, and Phase-5 timeline discussion. §§1–5.6 populated; §§6–9 (roofline, cross-model discussion, threats to validity, conclusion) present with Phase-3/4/5 findings, roofline awaiting Phase 9 for exact FLOPs.
+
+2. **Figures in `results/plots/` — 16 PNGs currently committed, split by origin:**
+
+   *Phase 3–4 analysis PNGs (8 files, produced by [`analysis/plots.py`](analysis/plots.py)):*
+   - [`resnet18_kernel_breakdown.png`](results/plots/resnet18_kernel_breakdown.png) — per-category time for ResNet-18
+   - [`mobilenetv3_kernel_breakdown.png`](results/plots/mobilenetv3_kernel_breakdown.png)
+   - [`distilbert_kernel_breakdown.png`](results/plots/distilbert_kernel_breakdown.png)
+   - [`gru_kernel_breakdown.png`](results/plots/gru_kernel_breakdown.png)
+   - [`resnet18_conv_algorithms.png`](results/plots/resnet18_conv_algorithms.png) — cuDNN algorithm-variant deep-dive
+   - [`cross_model_category_stacked.png`](results/plots/cross_model_category_stacked.png) — 4-model kernel-category stacked bar
+   - [`cross_model_latency_throughput.png`](results/plots/cross_model_latency_throughput.png)
+   - [`cross_model_tc_share.png`](results/plots/cross_model_tc_share.png)
+
+   *Phase 5 Nsight screenshots (8 files, manual from `nsys-ui.exe`):*
+   - `nsight_{model}_overview.png` — full-capture view with three NVTX bands (warmup / cuda_event_timing / profiler_capture)
+   - `nsight_{model}_one_inference.png` — single-iter zoom showing individual kernel bars + CUDA API row + cuDNN API ticks
+
+   *Aspirational / Phase 6+ (not yet present):* FP32→FP16 speedup grouped bar, batch-scaling line chart, roofline log-log plane. These will land with Phases 7, 8, 9 respectively.
+
+3. **CSV tables in `results/tables/`:** [`baseline_breakdown.csv`](results/tables/baseline_breakdown.csv) (Phase 4 centerpiece, 1 header + 4 data rows × 25 columns). Additional CSVs will land per experiment (benchmark-toggle, AMP, batch-sweep, roofline) in Phase 6+.
+
+4. **Nsight Systems stats CSVs in `results/nsys/stats/`:** 8 files (kern_sum + api_sum × 4 models), regenerable from the committed `.nsys-rep` via `nsys stats`.
+
+5. **Chrome traces** under `results/traces/` (4 files) and **Nsight binary reports** under `results/nsys/` (4 files, 181 KB–992 KB) for spot-checking individual runs in the respective GUIs.
 
 ---
 
