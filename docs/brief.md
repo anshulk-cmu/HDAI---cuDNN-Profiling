@@ -29,11 +29,13 @@
 | Phase 11 — writeup | [ ] pending | |
 | Phase 12 — buffer | [ ] pending | |
 
-**Extra experiment queued (not in original plan):** TF32-off re-profile of ResNet-18 (`torch.backends.cuda.matmul.allow_tf32 = False` + `torch.backends.cudnn.allow_tf32 = False`). Expected to make Winograd competitive again; would be a strong paired-bar figure for the writeup.
+**Extra experiment queued (not in original plan):** TF32-off re-profile of ResNet-18. On PyTorch 2.10.0+cu128 the Phase 5 `[flags]` snapshot already shows `torch.backends.cuda.matmul.allow_tf32 = False` out of the box, so the experiment reduces to flipping **`torch.backends.cudnn.allow_tf32 = False`** (currently True, and the actual route through which ResNet-18's 58.45 % TC share is dispatched). Phase 5 already surfaced a partial answer: under short warmup, Winograd *does* reappear in the Nsight capture at 3.0 % (§ Phase-5 row above) — so cuDNN's benchmark search considers it, it just loses to TF32 TC implicit-GEMM in steady state. A controlled TF32-off A/B would be the clean paired-bar figure for the writeup.
 
-### Findings so far (end of Phase 3, four models profiled — see `execution_log_3.md` for cross-model)
+### Findings so far (end of Phase 5, four models profiled, classifier wired, Nsight timelines captured)
 
-**Four-model latency/TC summary (batch per DEFAULT_BATCH, FP32+TF32, benchmark=True):**
+Per-phase logs: [`execution_log_2.md`](execution_log_2.md) (ResNet-18 rework), [`execution_log_3.md`](execution_log_3.md) (three-model port), [`execution_log_4.md`](execution_log_4.md) (classifier + cross-model CSV), [`execution_log_5.md`](execution_log_5.md) (Nsight + NVTX + cross-check).
+
+**Four-model latency/TC summary (batch per DEFAULT_BATCH, FP32+TF32 via cuDNN path, `cudnn.benchmark=True`):**
 
 | Model | Batch | Latency (ms) | Throughput (samples/s) | TC share |
 |---|---:|---:|---:|---:|
@@ -42,13 +44,22 @@
 | DistilBERT-base |  8 | 12.36 ± 0.44 | 647 | **0.00 %** |
 | Tiny GRU | 32 |  0.25 ± 0.01 | 127 003 | 16.77 % |
 
-**Key findings:**
+Full 25-column per-category breakdown in [`results/tables/baseline_breakdown.csv`](../results/tables/baseline_breakdown.csv) (Phase 4 centerpiece).
 
-- **ResNet-18:** 79.42 % conv; Winograd predicted but TF32 Tensor-Core implicit-GEMM observed; layout-converts eat 9.52 % of CUDA time (motivates `channels_last` sooner).
+**Key findings (Phases 2–4):**
+
+- **ResNet-18:** 79.42 % conv; brief predicted Winograd, observed TF32 Tensor-Core implicit-GEMM in full-warmup baseline; layout-converts eat 9.52 % of CUDA time (motivates `channels_last` sooner).
 - **MobileNetV3-Small:** BN unexpectedly large (21.83 %) because it amortises badly over tiny convs; depthwise conv (25.71 %) routes through PyTorch-native kernels, not cuDNN; TC share drops to 15 % (only pointwise 1×1 convs are TC-eligible).
 - **DistilBERT-base:** 91.89 % of time in `aten::addmm` backed by **MAGMA** (not cuBLAS as brief predicted); **0 % Tensor-Core engagement** at FP32; attention fully fused via `fmha_cutlassF_f32_aligned_64x64_rf_sm80` FlashAttention. Strongest finding of the study so far — dispatcher routed matmuls to a non-TC library.
 - **Tiny GRU:** cuDNN's persistent-RNN kernel (`RNN_blockPersist_fp_GRU`) dominates at 73.33 %; 16.77 % of time in `cutlass_80_tensorop_s1688gemm_128x256` on the input-to-hidden matmul (partial TC engagement).
-- **TF32 default on sm_80+** means "FP32 inference" means four different things for the four models. One flag, four regimes.
+- **Two TF32 flags, not one.** PyTorch 2.10.0+cu128 defaults `torch.backends.cudnn.allow_tf32 = True` but `torch.backends.cuda.matmul.allow_tf32 = False` (Phase 5 `[flags]` snapshot). "FP32 inference" therefore means different things for the cuDNN conv path vs the aten matmul path, and the brief's original "one flag" framing is imprecise.
+
+**Additional findings from Phase 5 (Nsight timeline):**
+
+- **cuDNN `benchmark=True` warmup is proportional to unique conv-shape count.** ResNet-18 warms up in 468.8 ms; MobileNetV3-Small takes **5.309 s** — an 11× gap driven by MobileNetV3's ~50+ distinct conv shapes, each needing an algorithm probe. During the long MobileNetV3 warmup the CUDA HW row is visibly sparse (GPU idle) while the host-side cuDNN search runs.
+- **Winograd is not absent on Blackwell — it loses in steady state.** ResNet-18's short-warmup (10-iter) Nsight capture contains `cudnn::winograd_nonfused::winogradForwardFilter4x4` at 3.0 % of GPU time. cuDNN probes Winograd during algorithm search, then picks TF32 TC implicit-GEMM at convergence.
+- **DistilBERT does probe cuBLAS at the API level** (visible as narrow ticks on the `cuBLAS` row in the Nsight trace) even though MAGMA runs the kernel. The §5.2.2 MAGMA finding is a kernel-row observation, not an API-row one.
+- **PyTorch Profiler ↔ Nsight cross-check** passes at worst 17.1 % per-iter disagreement; ResNet-18 and GRU agree within 2.1 %. [`analysis/cross_check_nsight.py`](../analysis/cross_check_nsight.py) is the reproducible regression test.
 
 ### Environment subsections completed
 
@@ -56,14 +67,14 @@
 - 2.3 conda env (`hdai` with Python 3.11.15)
 - 2.4 PyTorch cu128 wheel (torch 2.10.0+cu128, torchvision 0.25.0+cu128, torchaudio 2.11.0+cu128)
 - 2.5 project packages (pandas, matplotlib, seaborn, nvtx, transformers, fvcore, ptflops; pillow pulled transitively)
+- 2.6 **Nsight Systems 2026.2.1** installed at `C:\Program Files\NVIDIA Corporation\Nsight Systems 2026.2.1\` (Phase 5 unblocked). `nsys.exe` (CLI) + `nsys-ui.exe` (GUI) both verified working. Not on PATH; [`profiling/run_nsight.sh`](../profiling/run_nsight.sh) uses absolute-path fallback.
 - 2.8 cuDNN reachability smoke test (3×3 conv on 16×64×56×56 dispatches correctly)
 
-Still to do from section 2:
-- 2.2 CUDA Toolkit 12.8 (optional — needed only for standalone `nvcc` / the Nsight installer bundle)
-- 2.6 Nsight Systems 2025.x (required before Phase 5)
-- 2.7 Nsight Compute (optional stretch)
+Still to do / deliberately skipped from section 2:
+- 2.2 CUDA Toolkit 12.8 — **not installed, not needed.** The cu128 PyTorch wheel bundles the full CUDA 12.8 runtime; `nsys` ships with Nsight Systems (§2.6) independently of any Toolkit install. A Toolkit install would only be needed if we wanted to build raw-C cuDNN benchmarks or use standalone `nvcc`.
+- 2.7 Nsight Compute (optional stretch) — not installed. Not required for any phase 1–12 deliverable.
 
-See `execution_log_0.md` for the full bootstrap trace, `execution_log_1.md` for the first-pass Phase 2 profile, and `execution_log_2.md` for the reworked Phase 2 (bug fixes, multi-trial rerun, analysis plots).
+See `execution_log_0.md` for the full bootstrap trace, `execution_log_1.md` for the first-pass Phase 2 profile, `execution_log_2.md` for the reworked Phase 2 (bug fixes, multi-trial rerun, analysis plots), `execution_log_3.md` for the three-model port, `execution_log_4.md` for the classifier + cross-model CSV, and `execution_log_5.md` for Nsight capture + NVTX + cross-check.
 
 ---
 
@@ -101,6 +112,8 @@ Why include it: because a huge chunk of modern edge vision uses this pattern, an
 
 What we expect to see: time breakdown roughly 60% depthwise conv + 30% pointwise (1×1) conv + 10% misc, FP16 speedup small, `cudnn.benchmark` helps only modestly because the depthwise kernels have fewer algorithm choices to pick between.
 
+> **Observed on this hardware (Phase 3, 2026-04-18).** Decomposition is *different from the prediction*: 37.6 % convolution (11.88 % `conv_implicit_gemm` pointwise + 25.71 % `conv_depthwise` dispatched through PyTorch-native `aten::_conv_depthwise2d`, not cuDNN), **21.83 % BatchNorm** (vs predicted ~10 % "misc" — BN amortises badly over tiny convs), 21.1 % matmul (15.52 % elementwise + pointwise helpers). TC share 14.94 % (only the 1×1 pointwise convs hit TC). Phase 5 Nsight finding: MobileNetV3's `cudnn.benchmark=True` **warmup is 5.309 s** — ~11× longer than ResNet-18's — because ~50+ distinct depthwise/pointwise/stride shapes each trigger an algorithm search. See `execution_log_3.md §3.1–3.2` and `execution_log_5.md §6`.
+
 ### Model 3 — DistilBERT-base (compute-bound matmul, Tensor Core showcase)
 
 HuggingFace `distilbert-base-uncased`, 66M parameters. Bigger than the other three combined, but it's still well under any memory ceiling and is the natural representative of "transformer that people actually use in production." The inference workload is almost entirely matmul — Q/K/V projections, attention, and FFN layers — with softmax and layer norm as rounding errors.
@@ -108,6 +121,8 @@ HuggingFace `distilbert-base-uncased`, 66M parameters. Bigger than the other thr
 Important note: most of DistilBERT's matmuls go through cuBLAS, not cuDNN. This is a good thing to observe and discuss in the writeup — cuDNN is the deep-learning library but transformer-heavy workloads hit cuBLAS more than cuDNN. The handful of cuDNN calls that do show up are for layer norm and occasionally softmax on some cuDNN versions.
 
 What we expect to see: 80%+ of time in `cublas` GEMM kernels with Tensor Core variants, FP16 speedup of 2–3× (attention scales well on Tensor Cores), and the role of sequence length as a knob that moves you from memory-bound-ish at seq=64 to clearly compute-bound at seq=512.
+
+> **Observed on this hardware (Phase 3, 2026-04-18).** The library prediction is *wrong*: `aten::addmm` routes to **MAGMA's `magma_sgemmEx_kernel`** (91.89 % of GPU time), not cuBLAS. The Tensor Core prediction is also wrong at FP32: **0.00 % TC engagement** at batch 8 / seq 128. Attention is fully fused into one `fmha_cutlassF_f32_aligned_64x64_rf_sm80` FlashAttention kernel (4.66 %) — no separate softmax row, no separate Q·Kᵀ matmul row. Phase 5 refinement: the `cuBLAS` *API row* in Nsight *is* populated (narrow ticks per `torch.addmm` call — torch probes cuBLAS at dispatch time) but execution lands in MAGMA, so the "no cuBLAS" claim holds at the *kernel* level, not the *API* level. FP16 speedup is Phase-7 work; the seq-sweep is Phase 12 optional. See `execution_log_3.md §3.3–3.4` and `execution_log_5.md §6.2.3`.
 
 ### Model 4 — Tiny GRU (memory-bound recurrent, cuDNN RNN path)
 
@@ -118,6 +133,8 @@ Why include it: to see cuDNN's RNN path, which is genuinely different code from 
 Sequence-based RNN inference is memory-bound almost by definition — you're doing a matmul of a tiny matrix (hidden × hidden) at every step, and the weights are tiny relative to the activations you're shuttling around. This gives us our fourth corner: conv compute-bound (ResNet-18), conv memory-bound (MobileNetV3-Small), matmul compute-bound (DistilBERT), matmul memory-bound (GRU). Clean quadrant.
 
 What we expect to see: a single `cudnn::rnn::...` kernel dominating the timeline, FP16 speedup modest (maybe 1.3×), and the "compute" column of the profile looking nothing like the other three models. Batch size scaling is dramatic here — going from batch 1 to batch 128 actually makes GRU look reasonable throughput-wise because you're amortizing the memory traffic.
+
+> **Observed on this hardware (Phase 3, 2026-04-18).** Prediction basically holds: `aten::_cudnn_rnn` at 96.1 %, with the persistent `RNN_blockPersist_fp_GRU` kernel alone at 73.33 %. Unexpected bonus: 16.77 % TC engagement via `cutlass_80_tensorop_s1688gemm_128x256_16x3_tn_align4` on the input-to-hidden matmul — brief predicted "modest" TC; "modest" holds. Phase 5 Nsight finding: at `iter_05 = 409.917 µs` the timeline shows **visible idle gaps between iterations**, directly confirming the launch-overhead-bound signature the brief predicts. FP16 speedup and batch sweep remain Phase 7/8 work. See `execution_log_3.md §3.5–3.6` and `execution_log_5.md §6.2.4`.
 
 ### Summary table of the zoo
 
@@ -146,14 +163,13 @@ nvidia-smi
 
 Expected output: your driver version, CUDA version reported (driver-level, not toolkit-level), and the RTX 5070 Ti Laptop GPU with its memory and power state. Write down the driver version — you want it at or above 570.xx for full sm_120 support. If it's older, update from https://www.nvidia.com/Download/index.aspx before doing anything else. This takes 15 minutes and requires a reboot, and it's the single biggest source of "nothing works" failures on Blackwell.
 
-### 2.2 Install CUDA Toolkit 12.8 (optional but helpful)
+### 2.2 Install CUDA Toolkit 12.8 (skipped — not needed for this project)
 
-PyTorch ships its own CUDA runtime inside the wheel, so technically you don't need a separate CUDA Toolkit install to run PyTorch + cuDNN. But you *do* need the CUDA Toolkit for:
+PyTorch ships its own CUDA runtime inside the wheel, so you don't need a separate CUDA Toolkit install to run PyTorch + cuDNN. The only reasons to install one:
 - `nvcc` (only if you want to compile raw CUDA code like Slimakanzer/cudnn-benchmark)
-- Nsight Systems (usually bundled with CUDA Toolkit installer)
-- Nsight Compute (ditto)
+- Nsight Systems / Nsight Compute — but these ship as **standalone installers** on the NVIDIA developer site; the CUDA Toolkit installer is not the only route.
 
-Recommended: install CUDA Toolkit 12.8 from https://developer.nvidia.com/cuda-12-8-0-download-archive. Windows Network Installer is simplest. During install, untick the driver component (you already have a newer driver), keep the rest. ~3GB on disk.
+> **Decision on this project (Phase 5, 2026-04-18):** the CUDA Toolkit was *not* installed. Nsight Systems 2026.2.1 was installed standalone from https://developer.nvidia.com/nsight-systems. All four models profile correctly with the cu128-bundled runtime. If you follow this plan fresh, you can skip §2.2 entirely — just grab Nsight Systems from its own download page.
 
 ### 2.3 Python environment
 
@@ -202,9 +218,17 @@ pip install nvtx          # for custom profiler range annotations
 
 ### 2.6 Nsight Systems
 
-Download from https://developer.nvidia.com/nsight-systems (requires free NVIDIA dev account). Get the 2025.x Windows installer. Default install. This gives you the `nsys` command and the GUI visualizer. The GUI is what you want for the timeline view — it's much clearer than Chrome trace for GPU work.
+Download from https://developer.nvidia.com/nsight-systems (requires free NVIDIA dev account). On this machine we installed **Nsight Systems 2026.2.1** (2025.x also works fine if you prefer an earlier release). Default install. Gives you `nsys.exe` (CLI) and `nsys-ui.exe` (GUI).
 
-Add Nsight to PATH if the installer doesn't: `C:\Program Files\NVIDIA Corporation\Nsight Systems 2025.x\target-windows-x64`.
+Install path on this machine: `C:\Program Files\NVIDIA Corporation\Nsight Systems 2026.2.1\`
+- CLI binary: `target-windows-x64\nsys.exe`
+- GUI binary: `host-windows-x64\nsys-ui.exe`
+
+Adding to PATH is **optional** — [`profiling/run_nsight.sh`](../profiling/run_nsight.sh) resolves `nsys` via `command -v` first and falls back to the absolute path above, so scripts work either way. If you prefer PATH for interactive use: `setx PATH "%PATH%;C:\Program Files\NVIDIA Corporation\Nsight Systems 2026.2.1\target-windows-x64"` from a fresh PowerShell, then open a new shell.
+
+Sanity check: `"/c/Program Files/NVIDIA Corporation/Nsight Systems 2026.2.1/target-windows-x64/nsys.exe" --version` should print `NVIDIA Nsight Systems version 2026.2.1.210-...`.
+
+Nsight 2026.x **case-sensitivity gotcha** surfaced in Phase 5: `-t cuDNN` (capital D, capital NN) is required; lowercase `cudnn` errors out with "Illegal --trace argument". Similarly the second invocation of `nsys stats` on the same `.nsys-rep` needs `--force-export=true`. Both are already baked into `run_nsight.sh`.
 
 ### 2.7 Optional: Nsight Compute
 
@@ -314,7 +338,9 @@ For CUDA kernel names specifically, use `.key_averages(group_by_input_shape=True
 
 ### 3.6 What Nsight Systems adds
 
-PyTorch Profiler tells you what PyTorch knows about. Nsight Systems gives you the system-level timeline: CUDA API calls, kernel executions, memory transfers, CPU threads, all on one scrollable timeline. It's invaluable for spotting gaps (where the GPU is idle waiting for CPU) and launch overhead (tiny kernels stacking up). For this project we'll use it mainly for the pretty visualization and for Phase 4–5 investigation when PyTorch Profiler alone isn't giving enough detail.
+PyTorch Profiler tells you what PyTorch knows about. Nsight Systems gives you the system-level timeline: CUDA API calls, kernel executions, memory transfers, CPU threads, all on one scrollable timeline. It's invaluable for spotting gaps (where the GPU is idle waiting for CPU) and launch overhead (tiny kernels stacking up). For this project we use it mainly for the timeline visualisation and for Phase 4–5 investigation when PyTorch Profiler alone isn't giving enough detail.
+
+> **Confirmed in Phase 5.** Nsight surfaced three findings that were invisible in the chrome-trace: (1) MobileNetV3's 5.3 s cuDNN algorithm-search warmup, (2) Winograd kernels probed-but-not-picked on ResNet-18 under short warmup, (3) idle gaps between iterations on GRU. All three required the API-row + host-row view that Nsight provides and PyTorch Profiler collapses. See writeup §5.6.
 
 ---
 
@@ -366,47 +392,62 @@ Skip anything about DeepSpeed, Megatron, vLLM, FSDP, or LLM inference optimizati
 
 ## 5. Project layout
 
-Create this structure on your local machine:
+This is the planned layout. **Asterisks (✱) mark files that exist as of Phase 5; the rest are Phase-6+ work.** The canonical repo-layout snapshot with current file descriptions is in [`README.md`](../README.md) — this section keeps the original plan for historical reference.
 
 ```
-hdai-project/
-├── README.md
-├── requirements.txt
+HDAI_Project/
+├── README.md                                 ✱
+├── requirements.txt                          ✱
+├── .gitignore                                ✱  (Nsight .sqlite ignored; results/ otherwise committed)
+├── docs/
+│   ├── brief.md                              ✱  (this file)
+│   ├── execution_log_0.md                    ✱  (env bootstrap)
+│   ├── execution_log_1.md                    ✱  (Phase 2 first pass, superseded)
+│   ├── execution_log_2.md                    ✱  (Phase 2 rework)
+│   ├── execution_log_3.md                    ✱  (Phase 3: three-model port)
+│   ├── execution_log_4.md                    ✱  (Phase 4: classifier + CSV)
+│   └── execution_log_5.md                    ✱  (Phase 5: Nsight + NVTX + cross-check)
 ├── env/
-│   ├── check_env.py          # verify GPU, cuDNN, PyTorch versions
-│   └── sanity_conv.py        # 10-line conv to confirm cuDNN path works
+│   ├── check_env.py                          ✱
+│   └── sanity_conv.py                        ✱
 ├── models/
-│   ├── __init__.py
-│   ├── resnet.py             # wrapper for torchvision ResNet-18
-│   ├── mobilenet.py          # wrapper for torchvision MobileNetV3-Small
-│   ├── distilbert.py         # wrapper for HuggingFace DistilBERT
-│   └── gru.py                # tiny custom GRU
-├── profiling/                # NOTE: NOT `profile/` — that name collides with Python's stdlib
-│   ├── __init__.py           # `profile` module via torch._dynamo's cProfile import chain.
-│   ├── run_baseline.py       # profile each model at baseline settings
-│   ├── run_benchmark_toggle.py  # compare cudnn.benchmark on/off
-│   ├── run_amp.py            # FP32 vs FP16 (autocast)
-│   ├── run_batch_sweep.py    # batch sizes [1, 8, 32, 128]
-│   ├── run_channels_last.py  # NHWC vs NCHW (vision models only)
-│   └── run_seq_sweep.py      # sequence length sweep for DistilBERT + GRU
+│   ├── __init__.py                           ✱
+│   ├── resnet.py                             ✱
+│   ├── mobilenet.py                          ✱
+│   ├── distilbert.py                         ✱
+│   └── gru.py                                ✱
+├── profiling/                                    (NOT `profile/` — stdlib collision; see §11)
+│   ├── __init__.py                           ✱
+│   ├── run_baseline.py                       ✱  (multi-trial; NVTX-instrumented in Phase 5)
+│   ├── run_nsight.sh                         ✱  (Phase-5 Nsight capture driver, all four models)
+│   ├── run_benchmark_toggle.py                  (Phase 6 — not yet written)
+│   ├── run_amp.py                               (Phase 7)
+│   ├── run_batch_sweep.py                       (Phase 8)
+│   ├── run_channels_last.py                     (Phase 12 optional)
+│   └── run_seq_sweep.py                         (Phase 12 optional)
 ├── analysis/
-│   ├── parse_trace.py        # convert chrome traces to pandas dataframes
-│   ├── classify_kernels.py   # label kernels as conv/matmul/norm/etc.
-│   ├── compute_roofline.py   # arithmetic intensity + measured throughput
-│   └── plots.py              # matplotlib/seaborn plotting
+│   ├── __init__.py                           ✱
+│   ├── parse_trace.py                        ✱  (chrome-trace → per-kernel table)
+│   ├── classify_kernels.py                   ✱  (16 buckets after Phase 4)
+│   ├── plots.py                              ✱  (8 PNGs: 4 per-model + 3 cross-model + 1 algo)
+│   ├── compute_summary.py                    ✱  (Phase-4 emitter of baseline_breakdown.csv)
+│   ├── cross_check_nsight.py                 ✱  (Phase-5 regression: PyTorch Profiler vs Nsight)
+│   └── compute_roofline.py                      (Phase 9 — not yet written)
 ├── results/
-│   ├── traces/               # chrome trace JSONs
-│   ├── nsys/                 # Nsight Systems .nsys-rep files
-│   ├── tables/               # CSV output of kernel-level data
-│   └── plots/                # PNGs
+│   ├── traces/                               ✱  chrome-trace JSONs, 4 files committed
+│   ├── nsys/                                 ✱  Phase-5 .nsys-rep (4 files) + run logs
+│   │   └── stats/                            ✱  kern_sum + api_sum CSVs per model (8 files)
+│   ├── tables/                               ✱  baseline_breakdown.csv (Phase 4)
+│   └── plots/                                ✱  16 PNGs: 8 analysis + 8 nsight_* screenshots
 └── writeup/
-    ├── final_report.md       # the main writeup
-    └── plots/                # copy of plots used in the writeup
+    └── final_report.md                       ✱  §§1–5.6 populated (Phases 1–5)
 ```
 
-Keep results out of git (or gitignored). The trace JSONs get large — hundreds of MB for a batch of 128 at seq 512.
+**Decision on committing artefacts:** unlike the original "keep results out of git" stance, we deliberately **commit** chrome traces, Nsight reports, PNGs, and CSVs under `results/`. The tradeoff: repo size grows (~25 MB currently) but the writeup's numbers reproduce without anyone having to re-run the profiler. Only regenerable Nsight SQLite side-files (`results/nsys/*.sqlite`) are gitignored. See the commented block in [`.gitignore`](../.gitignore) lines 20–25 for the rationale. This reverses the "small repo, regenerate" advice of the pre-Phase-2 draft; turns out chrome traces on a 12 GB card at batch 32 come out at ~3 MB apiece (not hundreds of MB as originally feared), and Nsight short-capture `.nsys-rep` at `--trials 2 --iters-per-trial 20 --warmup 10` stays under 1 MB each.
 
 ### 5.1 requirements.txt
+
+Original draft:
 
 ```
 torch>=2.7
@@ -419,7 +460,7 @@ seaborn
 nvtx
 ```
 
-Don't pin exact versions. The Blackwell-compatible wheel changes frequently; let pip resolve.
+**What we actually pinned (Phase 1, updated through Phase 5):** see the committed [`requirements.txt`](../requirements.txt). We deliberately *did* pin exact versions because the cu128 Blackwell path is fragile and we wanted the same numbers to reproduce months later. Notable adds beyond the original stub: `fvcore` / `ptflops` (FLOP counting, staged for Phase 9 roofline), `pillow` / `tokenizers` / `safetensors` / `huggingface-hub` (transitive from DistilBERT), `nvtx==0.2.15` (pinned through Phase 0, finally *exercised* in Phase 5's `run_baseline.py` NVTX ranges). Torch itself is installed from `pytorch.org/whl/cu128` — not PyPI — because the default PyPI wheel does not carry sm_120 kernels and fails silently on Blackwell.
 
 ---
 
@@ -432,10 +473,10 @@ Read the Reference Code section (section 4) above. Don't skip this. Open the PyT
 ### Phase 1: Environment setup
 
 Follow section 2 end to end. By the end of this phase:
-- `nvidia-smi` works
-- PyTorch with cu128 wheel installed
-- `env/check_env.py` prints GPU name, cuDNN version, successful matmul
-- Nsight Systems installed and `nsys --version` works
+- `nvidia-smi` works ✓ (Phase 1)
+- PyTorch with cu128 wheel installed ✓ (Phase 1, torch 2.10.0+cu128)
+- `env/check_env.py` prints GPU name, cuDNN version, successful matmul ✓ (Phase 1)
+- Nsight Systems installed and `nsys --version` works ✓ (Phase 5, version 2026.2.1.210; install was delayed from Phase 1 to Phase 5 — everything else could proceed without it)
 
 If setup takes longer than 90 minutes (common on Windows), don't push through — switch to Colab for the rest of the project and come back to local setup later. Don't burn 3 hours on driver issues.
 
@@ -481,7 +522,7 @@ print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=30))
 prof.export_chrome_trace("results/traces/resnet18_baseline.json")
 ```
 
-Run it. Look at the table output. Open `results/traces/resnet18_baseline.json` in `chrome://tracing` (or use Perfetto UI at https://ui.perfetto.dev/).
+Run it. Look at the table output. (Filename after the Phase-2 rework is actually `results/traces/resnet18_baseline_bs32_benchOn.json` — encoded batch + benchmark state to allow multiple configurations to coexist.) Open in `chrome://tracing` (or use Perfetto UI at https://ui.perfetto.dev/).
 
 Things to notice and screenshot:
 - Top cuDNN kernels by cumulative time
@@ -556,25 +597,37 @@ def classify_kernel(name):
     return 'other'
 ```
 
-Produce a per-model summary table:
+Produce a per-model summary table.
 
-| Model | Total CUDA time (ms) | Conv % | Matmul % | Norm % | Elementwise % | Other % |
-|---|---|---|---|---|---|---|
-| ResNet-18 | ... | ... | ... | ... | ... | ... |
-| MobileNetV3-Small | ... | ... | ... | ... | ... | ... |
-| DistilBERT | ... | ... | ... | ... | ... | ... |
-| Tiny GRU | ... | ... | ... | ... | ... | ... |
+**Actually produced (Phase 4, committed in [`results/tables/baseline_breakdown.csv`](../results/tables/baseline_breakdown.csv)):** 25 columns — model, batch, latency mean/std, throughput, total CUDA ms, event count, 17 per-category percentage columns, and a cross-cutting `tc_total_pct` column. Condensed rendering:
 
-Save as CSV to `results/tables/baseline_breakdown.csv`.
+| Model | Batch | Lat (ms) | Thru (samp/s) | Conv % | Matmul % | Norm % | Elem % | Other % | TC % |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| ResNet-18 | 32 | 11.71 ± 0.61 | 2,733 | 69.9 | 0.1 | 8.5 | 8.7 | 12.8 | 58.5 |
+| MobileNetV3-Small | 32 | 3.01 ± 0.18 | 10,644 | 37.6 | 21.1 | 21.8 | 15.5 | 4.0 | 14.9 |
+| DistilBERT-base | 8 | 12.36 ± 0.44 | 648 | 0.0 | 96.5 | 1.5 | 1.9 | 0.1 | 0.0 |
+| Tiny GRU | 32 | 0.25 ± 0.01 | 127,003 | 0.0 | 18.5 | 0.0 | 1.5 | 80.0 | 16.8 |
 
-By end of Phase 4: one master table with the four models' time distribution. This is the centerpiece figure of the whole project.
+All rows sum to 100 ± 0.01 pp (classifier coverage is 100 % after the Phase-4 `conv_depthwise` / `fused_attention` / `embed_gather` rule additions — `other_pct = 0.00` for every model). See `execution_log_4.md` for the classifier-bug audit that surfaced those three new buckets.
+
+By end of Phase 4: master table + regenerator script ([`analysis/compute_summary.py`](../analysis/compute_summary.py)). Centerpiece figure of the whole project.
 
 ### Phase 5: Nsight Systems timeline view
 
-PyTorch Profiler gives you tables. Nsight Systems gives you a picture. Profile one or two models through `nsys`:
+PyTorch Profiler gives you tables. Nsight Systems gives you a picture. Profile each model through `nsys`.
 
-```powershell
-nsys profile -t cuda,cudnn,cublas,nvtx -o results/nsys/resnet18 python -m profiling.run_baseline --model resnet18
+> **Phase 5 executed (2026-04-18, see `execution_log_5.md`):**
+> - Capture driver: [`profiling/run_nsight.sh`](../profiling/run_nsight.sh) — captures all four models in one pass with shortened parameters (`--trials 2 --iters-per-trial 20 --warmup 10`) to keep each `.nsys-rep` under 1 MB.
+> - Trace selection: `-t cuda,cuDNN,cublas,nvtx -s none --cuda-memory-usage=true`. Note case-sensitive `cuDNN` (Nsight 2026.x rejects lowercase `cudnn`).
+> - NVTX instrumentation: [`profiling/run_baseline.py`](../profiling/run_baseline.py) gained `_print_flags()` + four NVTX `annotate` wrappers (`warmup` / `cuda_event_timing` / `profiler_capture` + per-iter `iter_NN`). Zero overhead when not under `nsys`.
+> - Screenshots: 8 PNGs (overview + one-inference per model) at [`results/plots/nsight_*.png`](../results/plots/).
+> - Cross-check: [`analysis/cross_check_nsight.py`](../analysis/cross_check_nsight.py) agrees with the PyTorch Profiler per-iter numbers within 17.1 % worst-case (ResNet-18 and GRU within 2.1 %).
+> - Writeup: full §5.6 "Timeline view via Nsight Systems" with figures 5.6.1a–5.6.4b and sub-findings §6.1–6.5.
+
+Original plan for reference:
+
+```bash
+nsys profile -t cuda,cuDNN,cublas,nvtx -o results/nsys/resnet18 python -m profiling.run_baseline --model resnet18
 ```
 
 Open `results/nsys/resnet18.nsys-rep` in the Nsight Systems GUI. Look at:
@@ -584,7 +637,7 @@ Open `results/nsys/resnet18.nsys-rep` in the Nsight Systems GUI. Look at:
 
 Take a screenshot of the timeline for one full inference. Include in writeup.
 
-This phase is mostly about getting comfortable with the Nsight GUI, which has a learning curve. Don't try to become a Nsight expert; just generate 1–2 traces, look at them, and move on.
+This phase is mostly about getting comfortable with the Nsight GUI, which has a learning curve. Don't try to become a Nsight expert; just generate 1–2 traces, look at them, and move on. *(In practice, all four were captured — 4× the plan's scope — because the incremental cost was near zero once the first one worked.)*
 
 ### Phase 6: The `cudnn.benchmark` experiment
 
@@ -903,39 +956,53 @@ If you want bit-exact reproducible results between runs, set `torch.backends.cud
 
 ## 9. Expected output artifacts
 
-By end of project, your `results/` directory should contain:
+**As of Phase 5 (committed), the `results/` directory contains:**
 
-**Traces (chrome trace JSON, 50–500 MB total):**
-- `resnet18_baseline.json`
-- `mobilenetv3_baseline.json`
-- `distilbert_baseline.json`
-- `gru_baseline.json`
-- `resnet18_fp16.json`
-- (Others as produced by experiments)
+**Chrome traces (committed, PyTorch Profiler, 2.9–5.3 MB each — far smaller than the original estimate):**
+- `resnet18_baseline.json` (legacy first-pass, Phase 2)
+- `resnet18_baseline_bs32_benchOn.json`
+- `mobilenetv3_baseline_bs32_benchOn.json`
+- `distilbert_baseline_bs8_benchOn.json`
+- `gru_baseline_bs32_benchOn.json`
+- FP16 variants, batch-sweep variants, etc. — *pending (Phases 7/8)*
 
-**Nsight Systems reports (.nsys-rep, 100–500 MB each):**
-- `resnet18_baseline.nsys-rep`
-- `distilbert_baseline.nsys-rep`
-- (Two is plenty.)
+**Nsight Systems reports (committed, 181 KB – 992 KB each — far smaller than the original estimate):**
+- `resnet18.nsys-rep` (640 KB)
+- `mobilenetv3.nsys-rep` (992 KB)
+- `distilbert.nsys-rep` (367 KB)
+- `gru.nsys-rep` (181 KB)
 
-**Tables (CSV):**
-- `baseline_breakdown.csv` — per-model kernel category %
+Plus stats CSVs (`results/nsys/stats/{model}_{kern,api}_sum_*.csv` — 8 files) regenerable from the `.nsys-rep` via `nsys stats`. The `results/nsys/*.sqlite` side-files are Nsight export artefacts and are gitignored.
+
+**Tables (CSV) — committed so far:**
+- `baseline_breakdown.csv` — per-model kernel category % (Phase 4 centerpiece; 25 columns × 4 rows)
+
+**Pending (Phases 6–8):**
 - `benchmark_toggle.csv` — cudnn.benchmark on vs off timings
 - `amp_comparison.csv` — FP32 vs FP16 timings
 - `batch_sweep.csv` — throughput vs batch size
 - `top_kernels_per_model.csv` — top 10 kernels per model × dtype
 
-**Plots (PNG, 200 DPI):**
-- `fig1_time_breakdown.png` — stacked bar, 4 models, 5 categories
-- `fig2_fp16_speedup.png` — grouped bar, 4 models, speedup factor
-- `fig3_batch_scaling.png` — line chart, throughput vs batch, 4 models × 2 dtypes
-- `fig4_algorithm_distribution.png` — stacked bar, which cuDNN algorithms
-- `fig5_roofline.png` — scatter on log-log roofline
-- `fig6_nsight_timeline.png` — screenshot from Nsight GUI
+**Plots (PNG, matplotlib) — 16 committed:**
+
+*Phase 3/4 analysis PNGs (produced by `analysis/plots.py`):*
+- `resnet18_kernel_breakdown.png` / `mobilenetv3_kernel_breakdown.png` / `distilbert_kernel_breakdown.png` / `gru_kernel_breakdown.png`
+- `resnet18_conv_algorithms.png`
+- `cross_model_category_stacked.png` / `cross_model_latency_throughput.png` / `cross_model_tc_share.png`
+
+*Phase 5 Nsight screenshots (manual from `nsys-ui.exe`):*
+- `nsight_{model}_overview.png` / `nsight_{model}_one_inference.png` for all four models
+
+**Pending (Phases 7/8/9/10):**
+- `fp16_speedup.png` (grouped bar)
+- `batch_scaling.png` (line chart)
+- `roofline.png` (log-log)
+
+(The original plan named these `fig1_..._png` through `fig6_..._png`; actual filenames are descriptive rather than numbered.)
 
 **Writeup:**
-- `final_report.md` — the prose document, 8–12 pages
-- Embedded plots
+- `final_report.md` — §§1–5.6 populated, §§6–9 roofline / cross-model / threats / conclusion scaffolded with Phase-3/4/5 findings. Roofline pass awaits Phase 9.
+- Embedded plots (16 PNGs referenced so far).
 
 ---
 
@@ -956,9 +1023,7 @@ story].
 
 ## Hardware and software
 
-RTX 5070 Ti Laptop GPU (Blackwell, sm_120), CUDA 12.8, cuDNN 9.x, PyTorch 2.x,
-Windows 11. Profiling with torch.profiler and Nsight Systems 2025.x.
-All measurements are inference-only, batch 32 unless stated, with warmup.
+RTX 5070 Ti Laptop GPU (Blackwell, sm_120), CUDA 12.8 (cu128 PyTorch wheel; no separate Toolkit), cuDNN 9.10.2, PyTorch 2.10.0+cu128, Windows 11. Profiling with `torch.profiler` and Nsight Systems 2026.2.1. All measurements are inference-only, batch 32 except DistilBERT (batch 8 for 12 GB VRAM), with warmup.
 
 ## Methodology
 
@@ -1037,13 +1102,15 @@ You installed the wrong PyTorch wheel. Reinstall with `--index-url https://downl
 
 ### Expected Winograd kernels in the ResNet-18 profile, saw none
 
-On Blackwell (`sm_120`) + cuDNN 9.10.2, and with PyTorch's default `torch.backends.cuda.matmul.allow_tf32 = True`, the benchmark search picks TF32 Tensor-Core implicit-GEMM (`cutlass_tensorop_s1688fprop_optimized_tf32_...`, `sm80_xmma_fprop_implicit_gemm_tf32f32_...`) over Winograd. Winograd's ~2.25× multiplication reduction is smaller than the TF32-on-TC throughput gap; cuDNN correctly measures TC-GEMM as faster.
+On Blackwell (`sm_120`) + cuDNN 9.10.2, the benchmark search picks TF32 Tensor-Core implicit-GEMM (`cutlass_tensorop_s1688fprop_optimized_tf32_...`, `sm80_xmma_fprop_implicit_gemm_tf32f32_...`) over Winograd *in steady state*. The routing is via `torch.backends.cudnn.allow_tf32 = True` (default) — on PyTorch 2.10.0+cu128 the parallel `torch.backends.cuda.matmul.allow_tf32` flag actually defaults to `False`, but the cuDNN conv path does its own TF32 decision and engages Tensor Cores regardless. Winograd's ~2.25× multiplication reduction is smaller than the TF32-on-TC throughput gap; cuDNN correctly measures TC-GEMM as faster.
 
-**If you want Winograd to appear:** disable TF32 before running the profile.
+**Phase 5 refinement.** Winograd is *not absent* on this hardware — it's just not picked at convergence. The Nsight short-warmup (10-iter) capture for ResNet-18 contains `cudnn::winograd_nonfused::winogradForwardFilter4x4` at 3.0 % of GPU time, meaning cuDNN *did* probe Winograd during algorithm search. With the full 30-iter warmup of the production baseline, cuDNN has converged on TF32 TC and dropped Winograd from the steady-state kernel mix.
+
+**If you want Winograd to *win* in steady state:** disable TF32 on the cuDNN path before running the profile.
 
 ```python
-torch.backends.cuda.matmul.allow_tf32 = False
-torch.backends.cudnn.allow_tf32 = False
+torch.backends.cudnn.allow_tf32 = False   # this is the flag that actually matters on PyTorch 2.10+cu128
+torch.backends.cuda.matmul.allow_tf32 = False  # already False by default on this wheel; harmless to set
 ```
 
 This is not a bug; it's the intended behaviour of `cudnn.benchmark=True` on newer hardware. Treat it as a finding, not a failure.
@@ -1181,39 +1248,44 @@ A workload with intensity < 75 FLOP/byte is memory-bound in FP32. At FP16 the ri
 
 ## 15. Appendix D — commands cheat sheet
 
-```powershell
+Uses `bash` (Git Bash) conventions where relevant. On PowerShell the `for m in ...; do ... done` lines become `foreach ($m in @("resnet18", ...)) { ... }`; everything else is identical.
+
+```bash
 # Environment check
 python env/check_env.py
 
-# Run baseline on all models
+# Run baseline on all models (--benchmark defaults True; use --no-benchmark for the control run)
 python -m profiling.run_baseline --model resnet18
 python -m profiling.run_baseline --model mobilenetv3
 python -m profiling.run_baseline --model distilbert
 python -m profiling.run_baseline --model gru
 
-# Or loop
+# Or loop (bash)
 for m in resnet18 mobilenetv3 distilbert gru; do python -m profiling.run_baseline --model $m; done
 
-# cudnn.benchmark toggle experiment
-python -m profiling.run_benchmark_toggle --model resnet18
+# cudnn.benchmark toggle experiment — Phase 6, script not yet written
+# python -m profiling.run_benchmark_toggle --model resnet18
 
-# FP32 vs FP16
-python -m profiling.run_amp --model resnet18
+# FP32 vs FP16 — Phase 7, script not yet written
+# python -m profiling.run_amp --model resnet18
 
-# Batch sweep
-python -m profiling.run_batch_sweep --model resnet18 --batches 1,4,16,64,256
+# Batch sweep — Phase 8, script not yet written
+# python -m profiling.run_batch_sweep --model resnet18 --batches 1,4,16,64,256
 
-# Nsight capture
-nsys profile -t cuda,cudnn,cublas,nvtx -o results/nsys/resnet18 python -m profiling.run_baseline --model resnet18
+# Nsight capture — single model (note capital cuDNN; lowercase rejected by Nsight 2026.x)
+nsys profile -t cuda,cuDNN,cublas,nvtx -o results/nsys/resnet18 python -m profiling.run_baseline --model resnet18
+
+# Nsight capture — all four models + stats CSVs in one shot (Phase 5)
+bash profiling/run_nsight.sh
 
 # Analysis
-python analysis/parse_trace.py results/traces/resnet18_baseline.json
-python analysis/classify_kernels.py
-python analysis/plots.py
-
-# Full regen of everything
-python scripts/run_all.py
+python -m analysis.parse_trace results/traces/resnet18_baseline_bs32_benchOn.json   # top-N kernel table
+python -m analysis.plots                       # regenerate all 8 analysis PNGs
+python -m analysis.compute_summary             # Phase-4 cross-model CSV
+python -m analysis.cross_check_nsight          # Phase-5 PyTorch-Profiler vs Nsight regression
 ```
+
+Note: `analysis/classify_kernels.py` is a library module, not a CLI — import its `classify()` / `aggregate_by_category()` / `CATEGORY_ORDER` from other scripts. A full overnight-runner shell wrapper is sketched in §25 but not currently committed; Phase 5 shipped `profiling/run_nsight.sh` as the only driver script to date.
 
 ---
 
@@ -1359,6 +1431,8 @@ print("\nAll checks passed.")
 
 ### 21.2 `profiling/run_baseline.py`
 
+**This is the early (pre-Phase-2-rework) starter template.** The committed file at [`profiling/run_baseline.py`](../profiling/run_baseline.py) has diverged substantially since and now includes: multi-trial CUDA-event timing (7 trials × 50 iters in a `time_trials` helper — Phase 2 rework), `BooleanOptionalAction` for `--benchmark`, the `_print_flags()` flag-state dumper (Phase 5), and four NVTX `annotate` context managers wrapping the warmup / timing / profiler phases (Phase 5). Refer to the committed file for the current canonical source. The template below is kept for historical context only.
+
 ```python
 """Baseline profile of a single model. Saves chrome trace + top-kernel table."""
 import argparse
@@ -1435,6 +1509,8 @@ if __name__ == '__main__':
 
 ### 21.3 `analysis/classify_kernels.py`
 
+**Early template.** The committed [`analysis/classify_kernels.py`](../analysis/classify_kernels.py) now has 16 category buckets (including `conv_depthwise`, `fused_attention`, `embed_gather` added in Phase 4), explicit keyword-precedence ordering, and separates the classifier library from any CLI — CSV emission moved to [`analysis/compute_summary.py`](../analysis/compute_summary.py). Use the real files; this stub only shows the idea.
+
 ```python
 """Parse a chrome trace JSON, classify kernels, output CSV breakdown."""
 import json
@@ -1487,10 +1563,12 @@ if __name__ == '__main__':
 
 ### 21.4 Minimal AMP comparison driver
 
+**Template for Phase 7; not yet implemented.** The `from profile.run_baseline` import below is a pre-rework artifact — the actual package is `profiling.run_baseline` (renamed in Phase 2 rework to dodge a stdlib collision; see §11). When we write `profiling/run_amp.py`, the real import will be `from profiling.run_baseline import load_model_and_input`. Also: single-window timing is acceptable for a quick A/B but the Phase 6+ scripts should reuse `profiling.run_baseline.time_trials` to stay consistent with the baseline methodology (7×50 trials, multi-trial mean ± std).
+
 ```python
 """FP32 vs FP16 timing. Outputs a single row of CSV per run."""
 import argparse, csv, os, torch
-from profile.run_baseline import load_model_and_input
+from profile.run_baseline import load_model_and_input  # historical typo; real import is profiling.run_baseline
 
 def time_model(model, x, use_amp, iters=100):
     torch.cuda.synchronize()
@@ -1600,53 +1678,45 @@ Note: ptflops reports MACs (multiply-accumulates), which is half of FLOPs by NVI
 
 ## 24. Repository hygiene — what to commit, what to ignore
 
-Your repo will have large binary artifacts that shouldn't go into git. Create a `.gitignore`:
+**Revised decision (Phase 2 rework onward):** we commit the whole `results/` tree except Nsight's regenerable SQLite side-files. The committed [`.gitignore`](../.gitignore) implements this; the empirical basis for reversing the original "don't commit traces" stance is that chrome traces at batch 32 come in at ~3 MB each and short-capture `.nsys-rep` at `--trials 2 --iters-per-trial 20 --warmup 10` stay under 1 MB each — far from the "100 MB+" worst-case this section originally feared. The total committed `results/` footprint at end of Phase 5 is ~25 MB, which is a reasonable price to pay for the writeup reproducing without anyone re-running the profiler.
+
+Current `.gitignore` (abbreviated):
 
 ```
-# Chrome traces and Nsight reports (can be 100MB+)
-results/traces/*.json
-results/nsys/*.nsys-rep
-results/nsys/*.qdrep
-results/nsys/*.sqlite
-
-# Python
+# Python / IDE / OS — standard
 __pycache__/
 *.pyc
-.venv/
-venv/
-.env
-
-# Notebook checkpoints
+.venv/  venv/  .env
 .ipynb_checkpoints/
+.DS_Store  Thumbs.db
+.idea/  .vscode/
 
-# OS
-.DS_Store
-Thumbs.db
+# Nsight side-files (regenerable from .nsys-rep via nsys stats)
+results/nsys/*.sqlite
 
-# IDE
-.idea/
-.vscode/
-
-# Large model downloads (torchvision, HuggingFace)
-~/.cache/
+# results/traces/*.json, results/nsys/*.nsys-rep, results/plots/*.png,
+# results/tables/*.csv, results/nsys/stats/*.csv are deliberately COMMITTED
+# so the writeup reproduces without re-running the profiler.
 ```
 
-**Do commit:**
+**Do commit (current practice):**
 - All `.py` scripts in `env/`, `models/`, `profiling/`, `analysis/`
+- `profiling/run_nsight.sh` (the only shell script)
 - `requirements.txt`
-- `README.md` and the writeup markdown
-- Small CSV tables (`results/tables/*.csv`)
-- Final plots (`results/plots/*.png`) — these are your deliverables, commit them
+- `README.md`, `docs/*.md`, `writeup/final_report.md`
+- `results/tables/*.csv`
+- `results/plots/*.png` (16 of them as of Phase 5)
+- `results/traces/*.json` (chrome traces, ~3 MB each)
+- `results/nsys/*.nsys-rep` (Nsight reports, <1 MB each at short-capture params)
+- `results/nsys/stats/*.csv` (`nsys stats` outputs)
 
 **Don't commit:**
-- Raw chrome traces (large, regeneratable, leak your filesystem paths)
-- Nsight reports (even larger)
-- Downloaded pretrained weights
-- Virtual environments
+- `results/nsys/*.sqlite` (regenerable, large relative to .nsys-rep)
+- Downloaded pretrained weights (they land in the HF / torchvision cache dirs)
+- Virtual envs
 
-If you use Git LFS, put the final plots there to keep the main repo small. But for a project this size, plain git with a good .gitignore is fine.
+**Good README structure:** the committed [`../README.md`](../README.md) is the canonical one; it's expanded well past the stub below as the study has progressed through Phases 1–5. The stub is preserved for historical context.
 
-**Good README structure:**
 ```markdown
 # cuDNN Profiling on Blackwell
 
@@ -1654,25 +1724,30 @@ Profiling four models (ResNet-18, MobileNetV3-Small, DistilBERT, tiny GRU)
 on RTX 5070 Ti Laptop GPU using PyTorch Profiler and Nsight Systems.
 
 ## Setup
-1. `conda env create -f environment.yml` (or `pip install -r requirements.txt`)
+1. `pip install -r requirements.txt`
 2. `python env/check_env.py` — should print sm_120 and pass smoke tests
 
-## Reproduce
+## Reproduce (Phase 5 state)
 ```
-python scripts/run_all.py
-python analysis/plots.py
+for m in resnet18 mobilenetv3 distilbert gru; do python -m profiling.run_baseline --model $m; done
+python -m analysis.plots
+python -m analysis.compute_summary
+bash profiling/run_nsight.sh                  # Phase 5
+python -m analysis.cross_check_nsight         # Phase 5 regression
 ```
 See `writeup/final_report.md` for results.
 
 ## Hardware
-RTX 5070 Ti Laptop GPU, CUDA 12.8, cuDNN 9.x, PyTorch 2.x.
+RTX 5070 Ti Laptop GPU, cu128 PyTorch wheel, cuDNN 9.10.2, Nsight Systems 2026.2.1.
 ```
 
 ---
 
 ## 25. Overnight batch runner
 
-Once your scripts work, you don't need to babysit each experiment. Here's a `scripts/run_all.ps1` (PowerShell) or `scripts/run_all.sh` (bash) that runs the whole study end to end. Kick it off before dinner, come back to finished traces.
+Once your scripts work, you don't need to babysit each experiment. Here's the plan for a `scripts/run_all.ps1` (PowerShell) or `scripts/run_all.sh` (bash) that runs the whole study end to end. Kick it off before dinner, come back to finished traces.
+
+> **Current state:** not yet written. The only committed runner script as of Phase 5 is [`profiling/run_nsight.sh`](../profiling/run_nsight.sh) which batches the four Nsight captures. The full overnight runner becomes worthwhile once Phase 6–8 scripts land (benchmark-toggle, AMP, batch-sweep) — it would wrap them with the `Start-Sleep -Seconds 5` thermal pause below.
 
 ```powershell
 # scripts/run_all.ps1
