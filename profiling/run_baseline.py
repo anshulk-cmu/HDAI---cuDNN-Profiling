@@ -13,6 +13,15 @@ import statistics
 import torch
 from torch.profiler import profile, ProfilerActivity, schedule
 
+try:
+    import nvtx
+except ImportError:
+    from contextlib import nullcontext
+    class _NvtxShim:
+        def annotate(self, *a, **k):
+            return nullcontext()
+    nvtx = _NvtxShim()
+
 
 def _load_resnet18(batch):
     from models.resnet import get_model, get_input
@@ -60,6 +69,19 @@ def load_model_and_input(name, batch):
     return MODEL_LOADERS[name](batch)
 
 
+def _print_flags(args):
+    cap = torch.cuda.get_device_capability(0)
+    print(f"[flags] device               = {torch.cuda.get_device_name(0)} (sm_{cap[0]}{cap[1]})")
+    print(f"[flags] cudnn.version        = {torch.backends.cudnn.version()}")
+    print(f"[flags] cudnn.enabled        = {torch.backends.cudnn.enabled}")
+    print(f"[flags] cudnn.benchmark      = {torch.backends.cudnn.benchmark}")
+    print(f"[flags] cudnn.allow_tf32     = {torch.backends.cudnn.allow_tf32}")
+    print(f"[flags] matmul.allow_tf32    = {torch.backends.cuda.matmul.allow_tf32}")
+    print(f"[flags] model/batch          = {args.model} / bs{args.batch}")
+    print(f"[flags] trials x iters       = {args.trials} x {args.iters_per_trial}")
+    print(f"[flags] warmup               = {args.warmup}")
+
+
 def time_trials(model, x, n_trials=7, iters_per_trial=50):
     """Return per-trial mean-ms-per-iter as a list of length n_trials.
 
@@ -98,18 +120,21 @@ def main():
         args.batch = DEFAULT_BATCH[args.model]
 
     torch.backends.cudnn.benchmark = args.benchmark
+    _print_flags(args)
     model, x = load_model_and_input(args.model, args.batch)
 
-    for _ in range(args.warmup):
-        with torch.no_grad():
-            _ = model(x)
-    torch.cuda.synchronize()
+    with nvtx.annotate("warmup", color="grey"):
+        for _ in range(args.warmup):
+            with torch.no_grad():
+                _ = model(x)
+        torch.cuda.synchronize()
 
-    trial_means = time_trials(
-        model, x,
-        n_trials=args.trials,
-        iters_per_trial=args.iters_per_trial,
-    )
+    with nvtx.annotate("cuda_event_timing", color="blue"):
+        trial_means = time_trials(
+            model, x,
+            n_trials=args.trials,
+            iters_per_trial=args.iters_per_trial,
+        )
     mean_ms = statistics.mean(trial_means)
     std_ms = statistics.stdev(trial_means) if len(trial_means) > 1 else 0.0
     min_ms = min(trial_means)
@@ -129,16 +154,18 @@ def main():
     trace_path = (f'results/traces/{args.model}_baseline'
                   f'_bs{args.batch}_{tag_bench}.json')
 
-    with profile(
-        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-        record_shapes=True,
-        schedule=schedule(wait=1, warmup=2, active=10, repeat=1),
-    ) as prof:
-        for _ in range(15):
-            with torch.no_grad():
-                _ = model(x)
-            torch.cuda.synchronize()
-            prof.step()
+    with nvtx.annotate("profiler_capture", color="green"):
+        with profile(
+            activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+            record_shapes=True,
+            schedule=schedule(wait=1, warmup=2, active=10, repeat=1),
+        ) as prof:
+            for i in range(15):
+                with nvtx.annotate(f"iter_{i:02d}", color="cyan"):
+                    with torch.no_grad():
+                        _ = model(x)
+                    torch.cuda.synchronize()
+                prof.step()
 
     print("\n" + prof.key_averages().table(
         sort_by="cuda_time_total", row_limit=25))

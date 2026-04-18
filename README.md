@@ -34,7 +34,7 @@ The deliverable is a profiling report + plots + this small repo of scripts.
 | Phase 2 rework — bug fixes, multi-trial rerun, analysis plots | Complete | [`docs/execution_log_2.md`](docs/execution_log_2.md), `results/traces/resnet18_baseline_bs32_benchOn.json` |
 | Phase 3 — baseline port to MobileNetV3, DistilBERT, GRU + cross-model plots | Complete | [`docs/execution_log_3.md`](docs/execution_log_3.md), 3 new traces, 8 plots under [`results/plots/`](results/plots/) |
 | Phase 4 — kernel classification, 4-model summary table | Complete | [`docs/execution_log_4.md`](docs/execution_log_4.md), [`results/tables/baseline_breakdown.csv`](results/tables/baseline_breakdown.csv), classifier buckets `conv_depthwise` + `fused_attention` + `embed_gather` added |
-| Phase 5 — Nsight Systems timeline | Blocked (Nsight install) | — |
+| Phase 5 — Nsight Systems timeline + NVTX instrumentation | Complete | [`docs/execution_log_5.md`](docs/execution_log_5.md), 4 `.nsys-rep` under [`results/nsys/`](results/nsys/), 8 screenshots `nsight_*` under [`results/plots/`](results/plots/), [`analysis/cross_check_nsight.py`](analysis/cross_check_nsight.py), writeup §5.6 |
 | Phases 6–12 (experiments, roofline, writeup) | Pending | — |
 
 ### Headline findings so far (four-model baseline — see `docs/execution_log_2.md` for ResNet-18, `docs/execution_log_3.md` for the other three)
@@ -76,6 +76,17 @@ A controlled TF32-off re-profile is queued as a future experiment to quantify ho
 - **Tiny GRU (0.25 ms / 127 003 samples/s).** `aten::_cudnn_rnn` at 96.1 %, with the persistent `RNN_blockPersist_fp_GRU` kernel alone taking 73.3 %. Unexpected TC engagement (16.8 %) via `cutlass_80_tensorop_s1688gemm_128x256` on the input-to-hidden matmul — brief predicted "memory-bound, modest TC"; "modest" holds.
 
 Two brief predictions fail outright (MobileNetV3 kernel distribution — BN underestimated; DistilBERT library dispatch — MAGMA won over cuBLAS). Both are real findings that go into the writeup.
+
+### Phase 5 findings — what the Nsight timeline adds
+
+- **`cudnn.benchmark=True` warmup cost is proportional to unique conv-shape count.** ResNet-18 warms up in 468.8 ms; **MobileNetV3-Small takes 5.309 s** — an 11× difference driven by MobileNetV3's ~50+ distinct depthwise + pointwise + stride variants each needing an algorithm probe. The CUDA HW row is *sparse* during MobileNetV3 warmup because the GPU is idle while cuDNN's host-side search runs.
+- **Winograd is not absent on Blackwell — it's just not picked in steady state.** The short-warmup Nsight capture for ResNet-18 contains a `cudnn::winograd_nonfused::winogradForwardFilter4x4` kernel at **3.0 %** of GPU time. Phase 2–4's full-warmup baselines reported zero Winograd; the Nsight capture catches cuDNN mid-search. This refines the §4.2 "Winograd is absent" claim into "Winograd is probed but not selected".
+- **DistilBERT does probe cuBLAS at the API level.** §5.2.2's MAGMA claim was strictly a kernel-row observation; the Nsight `cuBLAS` API row does show narrow ticks per `torch.addmm` call, even though the actual GEMM lands in MAGMA. Updated writeup §5.6.3 accordingly.
+- **PyTorch Profiler ↔ Nsight cross-check passes at worst 17.1 %.** Two models (ResNet-18, GRU) agree within 2.1 %. MobileNetV3 (+14.15 %) and DistilBERT (-17.10 %) disagree by larger margins — explained by the short-warmup capture averaging across warmup + timing + profiler iters while PyTorch Profiler measures only 10 steady-state iters. `python -m analysis.cross_check_nsight` is the reproducible regression test.
+- **`cudaDeviceSynchronize` is visible on the CUDA API row** in all four captures (sourced from `torch.cuda.synchronize()` at the end of each profiled iter). The chrome-trace attributed that time to a gap between kernels rather than to an API call — Nsight makes the attribution explicit.
+- **Minor audit artefact:** `[flags]` snapshot at startup reveals `torch.backends.cuda.matmul.allow_tf32 = False` on PyTorch 2.10.0+cu128, contradicting the prose claim at the end of the ResNet-18 findings section. ResNet-18's TC share still comes from the cuDNN path (`cudnn.allow_tf32 = True` is still default), so the headline numbers are unaffected; small clarification queued.
+
+All eight Nsight screenshots + full per-subsection discussion in writeup [§5.6](writeup/final_report.md). Binary reports under [`results/nsys/`](results/nsys/); text-mode stats CSVs under [`results/nsys/stats/`](results/nsys/stats/).
 
 ---
 
@@ -211,13 +222,19 @@ HDAI_Project/
 │   ├── parse_trace.py          # chrome-trace JSON -> per-kernel (time, #calls)
 │   ├── classify_kernels.py     # kernel-name -> coarse category (16 buckets after Phase 4)
 │   ├── plots.py                # per-model breakdowns + cross-model comparison plots
-│   └── compute_summary.py      # Phase-4 CSV emitter (baseline_breakdown.csv)
+│   ├── compute_summary.py      # Phase-4 CSV emitter (baseline_breakdown.csv)
+│   └── cross_check_nsight.py   # Phase-5 regression: PyTorch Profiler vs Nsight agreement
+├── profiling/
+│   ├── run_baseline.py         # NVTX-instrumented (Phase 5) multi-trial baseline driver
+│   └── run_nsight.sh           # Phase-5 Nsight capture driver (all four models)
 ├── results/
-│   ├── traces/                 # chrome-trace JSONs (committed)
-│   ├── plots/                  # analysis PNGs (committed)
+│   ├── traces/                 # chrome-trace JSONs (committed, Phase 3)
+│   ├── nsys/                   # Phase-5 Nsight .nsys-rep binary reports (committed)
+│   │   └── stats/              # Phase-5 nsys stats CSVs (kern_sum + api_sum per model)
+│   ├── plots/                  # analysis PNGs + nsight_* screenshots (committed)
 │   └── tables/                 # CSV summaries — baseline_breakdown.csv (Phase 4)
 └── writeup/
-    └── final_report.md         # the main writeup, sections scaffolded
+    └── final_report.md         # the main writeup, §§1-5.6 populated
 ```
 
 Traces and plots under `results/` are **committed** so the repo reproduces the paper's numbers without needing to rerun the profiler. Phase-3 onward additions (more models, experiment drivers, Nsight reports, roofline CSVs, an overnight runner) will add folders as they are actually needed — we don't pre-scaffold empty directories.
@@ -257,12 +274,14 @@ python -m analysis.plots
 # Analysis: emit the Phase-4 cross-model summary CSV
 python -m analysis.compute_summary
 
-# Nsight capture (Phase 5, blocked on a separate install)
-# nsys profile -t cuda,cudnn,cublas,nvtx -o results/nsys/resnet18 ^
-#     python -m profiling.run_baseline --model resnet18
+# Nsight Systems capture (Phase 5): all four models, all artefacts in one shot
+bash profiling/run_nsight.sh
+
+# Cross-check PyTorch Profiler vs Nsight (regression test)
+python -m analysis.cross_check_nsight
 ```
 
-Phase 4's kernel-classification summary CSV ([`results/tables/baseline_breakdown.csv`](results/tables/baseline_breakdown.csv)) is now produced by [`analysis/compute_summary.py`](analysis/compute_summary.py). Phases 5+ (Nsight timeline, benchmark-toggle, AMP, batch-sweep, roofline) will add more CLI entry points under `profiling/` and `analysis/`.
+Phase 4's kernel-classification summary CSV ([`results/tables/baseline_breakdown.csv`](results/tables/baseline_breakdown.csv)) is produced by [`analysis/compute_summary.py`](analysis/compute_summary.py). Phase 5's Nsight capture is driven by [`profiling/run_nsight.sh`](profiling/run_nsight.sh) and consumes the NVTX instrumentation added to [`profiling/run_baseline.py`](profiling/run_baseline.py) in the same phase; the cross-check script [`analysis/cross_check_nsight.py`](analysis/cross_check_nsight.py) compares per-iter GPU time between the two profilers. Phases 6+ (benchmark-toggle, AMP, batch-sweep, roofline) will add more CLI entry points under `profiling/` and `analysis/`.
 
 ---
 

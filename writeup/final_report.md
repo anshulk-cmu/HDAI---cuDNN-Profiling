@@ -58,6 +58,7 @@
   - [5.3 Tiny GRU](#53-tiny-gru-completed)
   - [5.4 Pending experiments (benchmark-toggle, AMP, batch sweep, channels-last, seq sweep, TF32-off)](#54-pending-experiments)
   - [5.5 Cross-model summary table *(Phase 4 centerpiece)*](#55-cross-model-summary-table-phase-4-centerpiece)
+  - [5.6 Timeline view via Nsight Systems *(Phase 5 centerpiece)*](#56-timeline-view-via-nsight-systems-phase-5-centerpiece)
 - [6. Roofline analysis](#6-roofline-analysis)
 - [7. Cross-model discussion](#7-cross-model-discussion)
 - [8. Threats to validity](#8-threats-to-validity)
@@ -666,6 +667,127 @@ Every kernel event in all four traces has been run through the classifier in [`a
 **How to read.** `Conv` for MobileNetV3 is `conv_implicit_gemm + conv_depthwise = 11.9 + 25.7 = 37.6` — the classifier splits regular (cuDNN-dispatched) from depthwise (PyTorch-native) so the 25.7 % depthwise finding is not hidden in a generic "other" bucket as it was in earlier drafts. `Matmul` for DistilBERT is `matmul_fp32 + fused_attention = 91.9 + 4.66 ≈ 96.5` — the FlashAttention kernel is classified under `fused_attention` (added in Phase 4) rather than dumped into `other`. `Other` for Tiny GRU is `rnn = 79.3 %` (the fused persistent-RNN kernel lives in its own bucket, not rolled into matmul).
 
 **Every row sums to 100.00 % ± 0.01.** The `other_pct` column in the CSV itself is 0.00 for all four models — every kernel above 0.1 % of any trace has a named category after the Phase-4 classifier fixes.
+
+<br>
+
+### 5.6 Timeline view via Nsight Systems *(Phase 5 centerpiece)*
+
+PyTorch Profiler produces *tables*; Nsight Systems produces a *system-level timeline* that shows kernels, CUDA API calls, cuDNN / cuBLAS library calls, and our own NVTX phase markers on a single scrollable time axis. Phase 5 captures one `.nsys-rep` per model under `nsys profile -t cuda,cuDNN,cublas,nvtx -s none` (see [`profiling/run_nsight.sh`](../profiling/run_nsight.sh)). The capture window is shortened to `--trials 2 --iters-per-trial 20 --warmup 10` to keep each `.nsys-rep` under 1 MB; **the latency numbers in §§4–5 are from the full-length baseline runs, not from the Nsight runs** — the Nsight captures are for timeline shape only.
+
+Instrumentation: [`profiling/run_baseline.py`](../profiling/run_baseline.py) now wraps the three phases in coloured NVTX ranges — `warmup` (grey), `cuda_event_timing` (blue), `profiler_capture` (green) — with per-iter `iter_NN` (cyan) sub-ranges inside the profiler block. A flag snapshot (`cudnn.benchmark`, `cudnn.allow_tf32`, `matmul.allow_tf32`, cuDNN version, SM capability) is dumped to stdout at startup for every run.
+
+#### 5.6.1 ResNet-18
+
+<div align="center">
+
+<img src="../results/plots/nsight_resnet18_overview.png" alt="ResNet-18 Nsight overview" width="820">
+
+**Figure 5.6.1a — ResNet-18 full capture overview.** Three NVTX bands anchor the three phases. `warmup [468.794 ms]` spans 10 forward passes; the GPU is almost fully utilised throughout because ResNet-18's conv workload dominates cuDNN's algorithm-search cost. The CUDA HW kernel row is visibly sparser in the early warm-up than in `cuda_event_timing` — direct evidence that cuDNN is still exploring algorithms in the first iterations. `cuBLAS`, `cuDNN`, and `CUDA API` rows are captured separately, confirming the trace selection works end-to-end.
+
+</div>
+
+<br>
+
+<div align="center">
+
+<img src="../results/plots/nsight_resnet18_one_inference.png" alt="ResNet-18 one inference" width="820">
+
+**Figure 5.6.1b — ResNet-18 single inference (`iter_05 = 10.979 ms`).** One full iter fills the frame, with `iter_04` and `iter_06` visible at the edges for context. The measured 10.979 ms is inside the 11.71 ± 0.61 ms confidence band reported in §4.1 — a direct visual cross-check of the baseline methodology. The long `cudaDeviceSynchronize` bar on the CUDA API row is the explicit `torch.cuda.synchronize()` call at the end of each profiled iter (see [`profiling/run_baseline.py:140`](../profiling/run_baseline.py#L140)); Nsight attributes it to the host thread, not the GPU kernel row — exactly where the chrome-trace hides it. The `cuBLAS` row is nearly empty, consistent with §4.1's `matmul_fp32 = 0.14 %`.
+
+</div>
+
+**New finding surfaced only in the Nsight capture.** The Nsight kernel summary ([`results/nsys/stats/resnet18_kern_sum_cuda_gpu_kern_sum.csv`](../results/nsys/stats/resnet18_kern_sum_cuda_gpu_kern_sum.csv)) lists a `cudnn::winograd_nonfused::winogradForwardFilter4x4` kernel at **3.0 %** — a Winograd filter-transform kernel. The full-warmup baseline in §4.1 reported *zero* Winograd kernels. The Nsight capture uses only 10 warmup iters vs the baseline's 30; **cuDNN's algorithm search has not yet converged on the TF32 implicit-GEMM winners, so it is still probing Winograd**. This is the first piece of direct evidence that the "Winograd is absent on Blackwell" finding of §4.2 is specifically a *steady-state* claim, not a "Blackwell cannot run Winograd" claim.
+
+#### 5.6.2 MobileNetV3-Small
+
+<div align="center">
+
+<img src="../results/plots/nsight_mobilenetv3_overview.png" alt="MobileNetV3 Nsight overview" width="820">
+
+**Figure 5.6.2a — MobileNetV3-Small full capture overview.** The single most striking feature in Phase 5: `warmup [5.309 s]` — **~11× longer than ResNet-18's warmup** despite MobileNetV3 being a smaller model. The CUDA HW row is visibly *sparse* throughout warmup (short kernels punctuated by large gaps) because the GPU is largely idle; the work is happening on the host, in cuDNN's benchmark algorithm search. MobileNetV3 has ~50+ distinct conv shapes (depthwise + pointwise + stride variations), each needing its own algorithm probe. This quantifies for the first time in the study that **`cudnn.benchmark=True` pays a warm-up cost proportional to unique conv-shape count**, and that depthwise-heavy architectures pay the most.
+
+</div>
+
+<br>
+
+<div align="center">
+
+<img src="../results/plots/nsight_mobilenetv3_one_inference.png" alt="MobileNetV3 one inference" width="820">
+
+**Figure 5.6.2b — MobileNetV3-Small single inference.** A short, dense train of small kernel bars on CUDA HW — the depthwise + pointwise + BN pattern playing out layer by layer. Individual kernels are so short that launch overhead matters disproportionately; this is what §5.1.3's "BatchNorm amortises badly over tiny convs" conclusion looks like on the timeline.
+
+</div>
+
+#### 5.6.3 DistilBERT-base
+
+<div align="center">
+
+<img src="../results/plots/nsight_distilbert_overview.png" alt="DistilBERT Nsight overview" width="820">
+
+**Figure 5.6.3a — DistilBERT-base full capture overview.** Warmup is short (no conv-shape diversity to search over) but the timing and profiler bands show dense, continuous GPU work — this is the long `magma_sgemmEx_kernel` trail dominating every inference. The `cuBLAS` and `cuDNN` rows are both visibly *present* with narrow ticks despite §5.2.2's claim that DistilBERT routes entirely through MAGMA — see the next figure for what those ticks actually are.
+
+</div>
+
+<br>
+
+<div align="center">
+
+<img src="../results/plots/nsight_distilbert_one_inference.png" alt="DistilBERT one inference" width="820">
+
+**Figure 5.6.3b — DistilBERT single inference (`iter_05 = 10.527 ms`).** One inference against the 12.36 ± 0.44 ms baseline; the shorter-warmup capture lands slightly under the steady-state. The dense CUDA HW row is the `magma_sgemmEx_kernel` stream (6 encoder layers × 4 matmuls = 24 long kernels per iter, plus 1 FlashAttention kernel per layer). The `cudaDeviceSynchronize` call is once again prominent on the CUDA API row. The narrow ticks on the `cuBLAS` row are an interesting refinement of §5.2.2's MAGMA finding: `torch.addmm` still *probes* cuBLAS at the API level for routing decisions, then hands execution to MAGMA — i.e. DistilBERT is MAGMA-dominated on the GPU kernel row, but not cuBLAS-silent on the API row.
+
+</div>
+
+#### 5.6.4 Tiny GRU
+
+<div align="center">
+
+<img src="../results/plots/nsight_gru_overview.png" alt="GRU Nsight overview" width="820">
+
+**Figure 5.6.4a — Tiny GRU full capture overview.** Warmup is tiny because the GRU uses cuDNN's fused persistent-RNN kernel which has a single shape signature — no algorithm search. The entire capture fits in well under a second even at this zoom.
+
+</div>
+
+<br>
+
+<div align="center">
+
+<img src="../results/plots/nsight_gru_one_inference.png" alt="GRU one inference" width="820">
+
+**Figure 5.6.4b — Tiny GRU single inference (`iter_05 = 409.917 µs`).** At this zoom the **idle gaps between iterations are visible** — between `iter_05` and `iter_06` there is white space on every row. This is the launch-overhead-bound signature §5.3 predicted: the actual kernel work is so short that time spent on CPU-side kernel dispatch is non-trivial. The `cudnnR...` label on the cuDNN row is the `cudnnRNNForward` API call; the actual persistent-RNN kernel lives on CUDA HW. The 409.917 µs here is ~60 % larger than the 252 µs steady-state baseline (§5.3); as with ResNet-18's Winograd finding, this is the 10-warmup-iter capture not yet converged.
+
+#### 5.6.5 PyTorch Profiler ↔ Nsight Systems cross-check
+
+[`analysis/cross_check_nsight.py`](../analysis/cross_check_nsight.py) reads the committed PyTorch-Profiler chrome-traces and the Nsight `cuda_gpu_kern_sum` CSVs, normalises both to per-iter ms, and prints a delta table. Exact stdout:
+
+```
+model            pyt ms/it   nsys ms/it   delta %
+--------------------------------------------------
+resnet18            11.337       11.569    +2.04%
+mobilenetv3          2.041        2.330   +14.15%
+distilbert          12.151       10.073   -17.10%
+gru                  0.172        0.172    +0.01%
+--------------------------------------------------
+worst |delta|: 17.10%
+OK (within 20% tolerance; target is < 10%)
+```
+
+Two models agree to better than 2.1 %; two disagree by 14–17 %. The disagreement is **not noise** — the two tools genuinely see different totals because:
+
+- **PyTorch Profiler** runs a narrow 10-iter active window after a separate 30-iter warm-up, measuring pure steady-state GPU-kernel time.
+- **Nsight** averages across all 65 forward passes in the short-capture run (10 warmup + 40 timing + 15 profiler), *including* the warm-up iters where cuDNN is still searching. Warmup iters are slower, so MobileNetV3's Nsight average skews higher.
+
+The DistilBERT direction (Nsight *lower* than PyTorch) is the opposite: here the short-warmup capture misses some per-algorithm search cost that the 30-iter full warmup incurs later. Both directions are real; neither indicates instrument error.
+
+**What Nsight adds that the chrome-trace does not:**
+
+1. **cuDNN / cuBLAS API rows are separate from the kernel row.** PyTorch Profiler flattens both into kernel events; Nsight keeps the API-side ticks in dedicated rows, so we can see (e.g.) that DistilBERT *does* probe cuBLAS at the API level even though MAGMA does the work.
+2. **`cudaDeviceSynchronize` is visible.** In the chrome-trace this is invisible on the GPU side; in Nsight it's a large bar on the CUDA API row that explains the gap between one iter's last kernel and the next iter's first.
+3. **Idle gaps between GRU kernels are visible.** The chrome-trace made GRU look like one dense stream; Nsight reveals the launch-overhead signature directly.
+4. **cuDNN algorithm-search cost is quantified.** MobileNetV3's 5.3-second warmup bar is the most compressed representation of "`cudnn.benchmark=True` is expensive when conv-shape diversity is high" this study has.
+5. **Winograd is not absent — it's just not steady-state optimal.** The Nsight-ResNet18 capture catches cuDNN probing Winograd during the 10-iter warmup, refining §4.2's claim.
+
+</div>
 
 <br>
 

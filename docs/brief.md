@@ -20,7 +20,7 @@
 | Phase 2 rework — bug fixes, multi-trial rerun, plots | [x] done | 11.71 ± 0.61 ms mean / 2 733 img/s (7 trials × 50 iters). Bugs in `run_baseline.py` fixed. Plots in `results/plots/`. See `execution_log_2.md`. |
 | Phase 3 — port to MobileNetV3 / DistilBERT / GRU | [x] done | 4 baselines complete. MobileNetV3 @ 3.01 ms (TC 15%, BN 22%), DistilBERT @ 12.36 ms (**0% TC — MAGMA dispatch, not cuBLAS**), GRU @ 0.25 ms (persistent RNN + TC input matmul). See `execution_log_3.md`. |
 | Phase 4 — kernel classification | [x] done | Classifier gains `conv_depthwise`, `fused_attention`, `embed_gather` buckets (zero `other` leakage on all 4 traces). `results/tables/baseline_breakdown.csv` emitted by new `analysis/compute_summary.py`. Cross-model summary § 5.5 added to writeup. See `execution_log_4.md`. |
-| Phase 5 — Nsight Systems timeline | [ ] blocked on Nsight install | |
+| Phase 5 — Nsight Systems timeline | [x] done | Nsight 2026.2.1 installed, 4 `.nsys-rep` captured, 8 screenshots, `analysis/cross_check_nsight.py` agreement ≤17 %. NVTX ranges + `_print_flags()` added to `run_baseline.py`. Winograd-in-warmup finding + MobileNetV3 5.3 s algo-search cost documented in writeup §5.6. See `execution_log_5.md`. |
 | Phase 6 — `cudnn.benchmark` toggle | [ ] pending | `run_baseline.py` now supports `--no-benchmark` (log_2 fix) |
 | Phase 7 — FP32 vs FP16 (AMP) | [ ] pending | |
 | Phase 8 — batch-size sweep | [ ] pending | cap at what fits in 12 GB, not 16 GB |

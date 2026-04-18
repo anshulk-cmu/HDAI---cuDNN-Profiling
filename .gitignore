@@ -20,3 +20,6 @@ Thumbs.db
 # Note: chrome-trace JSONs, Nsight reports, and plot PNGs under
 # results/ are committed deliberately so the repo reproduces the
 # paper's numbers without needing to re-run the profiler.
+
+# Nsight Systems side-files (regenerable from .nsys-rep via nsys stats).
+results/nsys/*.sqlite

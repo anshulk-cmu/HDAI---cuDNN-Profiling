@@ -1,0 +1,9 @@
+[flags] device               = NVIDIA GeForce RTX 5070 Ti Laptop GPU (sm_120)
+[flags] cudnn.version        = 91002
+[flags] cudnn.enabled        = True
+[flags] cudnn.benchmark      = True
+[flags] cudnn.allow_tf32     = True
+[flags] matmul.allow_tf32    = False
+[flags] model/batch          = (all 4, captured separately) / bs(per DEFAULT_BATCH)
+[flags] trials x iters       = 2 x 20
+[flags] warmup               = 10

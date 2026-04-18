@@ -1,0 +1,100 @@
+
+==================================================================
+Capturing resnet18
+==================================================================
+WARNING: CPU context switches trace requires administrative privileges, disabling.
+Collecting data...
+Generating 'C:\Users\worka\AppData\Local\Temp\nsys-worka\nsys-report-5b5a.qdstrm'
+[1/1] [0%                          ] resnet18.nsys-rep[1/1] [0%                          ] resnet18.nsys-rep[1/1] [===23%                      ] resnet18.nsys-rep[1/1] [==========47%               ] resnet18.nsys-rep[1/1] [==========49%               ] resnet18.nsys-rep[1/1] [===========50%              ] resnet18.nsys-rep[1/1] [========================100%] resnet18.nsys-rep[1/1] [========================100%] resnet18.nsys-rep
+Generated:
+	D:\HDAI_Project\results/nsys/resnet18.nsys-rep
+Generating SQLite file results/nsys/resnet18.sqlite from results/nsys/resnet18.nsys-rep
+Processing [results/nsys/resnet18.sqlite] with [C:\Program Files\NVIDIA Corporation\Nsight Systems 2026.2.1\host-windows-x64\reports\cuda_gpu_kern_sum.py] to [results/nsys/stats/resnet18_kern_sum_cuda_gpu_kern_sum.csv]... PROCESSED
+
+
+NOTICE: Existing SQLite export found: results/nsys/resnet18.sqlite
+        It is assumed file was previously exported from: results/nsys/resnet18.nsys-rep
+        Consider using --force-export=true if needed.
+
+Processing [results/nsys/resnet18.sqlite] with [C:\Program Files\NVIDIA Corporation\Nsight Systems 2026.2.1\host-windows-x64\reports\cuda_api_sum.py] to [results/nsys/stats/resnet18_api_sum_cuda_api_sum.csv]... PROCESSED
+
+  .nsys-rep size: 1 MB
+
+==================================================================
+Capturing mobilenetv3
+==================================================================
+WARNING: CPU context switches trace requires administrative privileges, disabling.
+Collecting data...
+Generating 'C:\Users\worka\AppData\Local\Temp\nsys-worka\nsys-report-5988.qdstrm'
+[1/1] [0%                          ] mobilenetv3.nsys-rep[1/1] [0%                          ] mobilenetv3.nsys-rep[1/1] [14%                         ] mobilenetv3.nsys-rep[1/1] [====28%                     ] mobilenetv3.nsys-rep[1/1] [========42%                 ] mobilenetv3.nsys-rep[1/1] [==========49%               ] mobilenetv3.nsys-rep[1/1] [===========50%              ] mobilenetv3.nsys-rep[1/1] [========================100%] mobilenetv3.nsys-rep[1/1] [========================100%] mobilenetv3.nsys-rep
+Generated:
+	D:\HDAI_Project\results/nsys/mobilenetv3.nsys-rep
+Generating SQLite file results/nsys/mobilenetv3.sqlite from results/nsys/mobilenetv3.nsys-rep
+Processing [results/nsys/mobilenetv3.sqlite] with [C:\Program Files\NVIDIA Corporation\Nsight Systems 2026.2.1\host-windows-x64\reports\cuda_gpu_kern_sum.py] to [results/nsys/stats/mobilenetv3_kern_sum_cuda_gpu_kern_sum.csv]... PROCESSED
+
+
+WARNING: Existing SQLite export found: results/nsys/mobilenetv3.sqlite
+         File is older than input file: results/nsys/mobilenetv3.nsys-rep
+         Use --force-export=true to update export file.
+
+usage: nsys stats [<args>] <input-file>
+Try 'nsys stats --help' for more information.
+  .nsys-rep size: 1 MB
+
+==================================================================
+Capturing distilbert
+==================================================================
+WARNING: CPU context switches trace requires administrative privileges, disabling.
+Collecting data...
+Generating 'C:\Users\worka\AppData\Local\Temp\nsys-worka\nsys-report-5440.qdstrm'
+[1/1] [0%                          ] distilbert.nsys-rep[1/1] [0%                          ] distilbert.nsys-rep[1/1] [=======38%                  ] distilbert.nsys-rep[1/1] [==========49%               ] distilbert.nsys-rep[1/1] [===========50%              ] distilbert.nsys-rep[1/1] [========================100%] distilbert.nsys-rep[1/1] [========================100%] distilbert.nsys-rep
+Generated:
+	D:\HDAI_Project\results/nsys/distilbert.nsys-rep
+Generating SQLite file results/nsys/distilbert.sqlite from results/nsys/distilbert.nsys-rep
+Processing [results/nsys/distilbert.sqlite] with [C:\Program Files\NVIDIA Corporation\Nsight Systems 2026.2.1\host-windows-x64\reports\cuda_gpu_kern_sum.py] to [results/nsys/stats/distilbert_kern_sum_cuda_gpu_kern_sum.csv]... PROCESSED
+
+
+WARNING: Existing SQLite export found: results/nsys/distilbert.sqlite
+         File is older than input file: results/nsys/distilbert.nsys-rep
+         Use --force-export=true to update export file.
+
+usage: nsys stats [<args>] <input-file>
+Try 'nsys stats --help' for more information.
+  .nsys-rep size: 1 MB
+
+==================================================================
+Capturing gru
+==================================================================
+WARNING: CPU context switches trace requires administrative privileges, disabling.
+Collecting data...
+Generating 'C:\Users\worka\AppData\Local\Temp\nsys-worka\nsys-report-a863.qdstrm'
+[1/1] [0%                          ] gru.nsys-rep[1/1] [0%                          ] gru.nsys-rep[1/1] [==========49%               ] gru.nsys-rep[1/1] [===========50%              ] gru.nsys-rep[1/1] [========================100%] gru.nsys-rep[1/1] [========================100%] gru.nsys-rep
+Generated:
+	D:\HDAI_Project\results/nsys/gru.nsys-rep
+Generating SQLite file results/nsys/gru.sqlite from results/nsys/gru.nsys-rep
+Processing [results/nsys/gru.sqlite] with [C:\Program Files\NVIDIA Corporation\Nsight Systems 2026.2.1\host-windows-x64\reports\cuda_gpu_kern_sum.py] to [results/nsys/stats/gru_kern_sum_cuda_gpu_kern_sum.csv]... PROCESSED
+
+
+WARNING: Existing SQLite export found: results/nsys/gru.sqlite
+         File is older than input file: results/nsys/gru.nsys-rep
+         Use --force-export=true to update export file.
+
+usage: nsys stats [<args>] <input-file>
+Try 'nsys stats --help' for more information.
+  .nsys-rep size: 1 MB
+
+Restoring committed Phase-3 chrome traces...
+
+==================================================================
+All captures complete. Artefacts:
+-rw-r--r-- 1 worka 197609 367K Apr 18 13:42 results/nsys/distilbert.nsys-rep
+-rw-r--r-- 1 worka 197609 181K Apr 18 13:42 results/nsys/gru.nsys-rep
+-rw-r--r-- 1 worka 197609 992K Apr 18 13:41 results/nsys/mobilenetv3.nsys-rep
+-rw-r--r-- 1 worka 197609 640K Apr 18 13:41 results/nsys/resnet18.nsys-rep
+total 40K
+-rw-r--r-- 1 worka 197609 3.1K Apr 18 13:42 distilbert_kern_sum_cuda_gpu_kern_sum.csv
+-rw-r--r-- 1 worka 197609 3.1K Apr 18 13:42 gru_kern_sum_cuda_gpu_kern_sum.csv
+-rw-r--r-- 1 worka 197609  14K Apr 18 13:41 mobilenetv3_kern_sum_cuda_gpu_kern_sum.csv
+-rw-r--r-- 1 worka 197609 2.4K Apr 18 13:41 resnet18_api_sum_cuda_api_sum.csv
+-rw-r--r-- 1 worka 197609 9.8K Apr 18 13:41 resnet18_kern_sum_cuda_gpu_kern_sum.csv
+==================================================================
